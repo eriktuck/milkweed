@@ -44,3 +44,7 @@ firebase-service-account.json
 
 # PS1
 *.ps1
+
+# Markdwon
+*.md
+!README.md

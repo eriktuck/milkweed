@@ -55,7 +55,7 @@ Goals
 -   Withdrawal: build out withdrawal plan that includes RMD and social securit
 -   
 
-
+FOR TXN CLASSIFIER: USE LORA TO TRAIN THE OUTPUT LAYER OF BERT (see LLM Engineering week 7 day 1).
 
 ## Debugging joint contribution
 

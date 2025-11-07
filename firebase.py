@@ -19,13 +19,13 @@ if not firebase_admin._apps:
         # Load credentials from the local file (local development)
         try:
             cred = credentials.Certificate(
-                os.path.join("secrets", "firebase-service-account.json")
+                os.path.join("secrets", "firebase-service-account")
             )
             firebase_admin.initialize_app(cred)
             print("Firebase app initialized from local file.")
         except FileNotFoundError:
             raise ValueError(
-                "Firebase service account file not found at secrets/firebase-service-account.json"
+                "Firebase service account file not found at secrets/firebase-service-account"
             )
         except Exception as e:
             raise ValueError(f"Error loading Firebase credentials from file: {e}")
