@@ -10,6 +10,7 @@ __pycache__/
 # Ignore local development files
 .env
 secrets/
+env-file
 firebase-service-account.json
 *.pkl
 *.db

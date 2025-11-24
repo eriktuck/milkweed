@@ -36,6 +36,7 @@ Thumbs.db
 
 # Secrets
 secrets/
+env-file
 .env
 firebase-service-account.json
 

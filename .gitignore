@@ -41,6 +41,7 @@ Thumbs.db
 secrets/
 .env
 firebase-service-account.json
+env-file
 
 # PS1
 *.ps1

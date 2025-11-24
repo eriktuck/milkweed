@@ -1,19 +1,62 @@
 from datetime import datetime as dt
 import json
 import numpy as np
-import os
 import pandas as pd
 import plotly.graph_objects as go
-import glob
 import pytz
 from flask import session
+from typing import Any, Optional
+from pathlib import Path
 
-def process_transactions(df, config):
-    category_names = config["cat_names"]
-    csp_from_group = config["csp_from_group"]
-    csp_from_category = config["csp_from_category"]
-    csp_labels = config["csp_labels"]
-    drop_cats = config["drop_cats"]
+# from core.services.firebase import (
+#     find_household_for_user
+# )
+
+def convert_raw_transactions_to_dataframe(txn_raw: list[dict[str, Any]]) -> pd.DataFrame:
+    df = pd.DataFrame(txn_raw)
+    df["date"] = pd.to_datetime(df["date"], errors="coerce", utc=True)
+    
+    return df
+
+
+def preprocess_transactions(df: pd.DataFrame) -> pd.DataFrame:
+    """Preprocess the transactions DataFrame."""
+    df["category_name"] = df["category"].apply(
+        lambda x: x.get("name", "") if isinstance(x, dict) else "")
+    
+    df["account_name"] = df["account"].apply(
+        lambda x: x.get("displayName", "") if isinstance(x, dict) else "")
+    
+    df.drop(columns=["category", "account", "merchant"], inplace=True)
+
+    return df
+
+
+def filter_owner_transactions(df: pd.DataFrame, user_config: dict):
+    """Split transactions by owner based on account ownership in config."""
+    accounts = user_config.get("accounts", [])
+    name = user_config.get("name", "unknown")
+
+    # Filter rows
+    filt = df["account_name"].isin(accounts)
+    subset = df.loc[filt].copy()
+
+    # Tag owner
+    subset["account_owner"] = name
+
+    if subset.empty:
+        print(f"No transactions for user {name}")
+
+    return subset
+
+
+def categorize_transactions(df: pd.DataFrame, user_config: dict):
+    """Categorize transactions according to the user's config and drop excluded categories"""
+    category_names = user_config["cat_names"]
+    csp_from_group = user_config["csp_from_group"]
+    csp_from_category = user_config["csp_from_category"]
+    csp_labels = user_config["csp_labels"]
+    drop_cats = user_config["drop_cats"]
     
     # Assign labels
     df["category_group"] = df["category_name"].map(category_names)
@@ -30,137 +73,191 @@ def process_transactions(df, config):
     return df
 
 
-def find_household_for_user(db, uid):
-    households_ref = db.collection("households")
-    query = households_ref.where("members", "array_contains", uid).limit(1)
-    docs = query.stream()
+def filter_and_process_owner_transactions(df: pd.DataFrame, user_config: dict) -> pd.DataFrame:
+    return categorize_transactions(
+        filter_owner_transactions(df, user_config),
+        user_config
+    )
+
+
+def check_processed(new_txn_df, processed):
+    """Helper function to print deleted transactions."""
+    # Combine processed and attributed transactions
+    new_combined_txns = pd.concat(
+        [entry['transactions'] for entry in processed], 
+        ignore_index=True
+    )
+
+    # Check dropped transactions (should only be from drop_cats)
+    combined_ids = set(new_combined_txns["id"])
+    new_ids = set(new_txn_df["id"])
+
+    dropped = new_ids - combined_ids
+    dropped_txns = new_txn_df[new_txn_df["id"].isin(dropped)]
+    if len(dropped) > 0:
+        print("Dropped transactions:")
+        print(dropped_txns)
+
+    return dropped_txns
+
+
+def process_and_attribute_transactions(
+        new_txn_df: pd.DataFrame,
+        config,
+        save_dropped: Optional[bool] = False
+    ) -> list[dict[str, Any]]:
+    user_configs = config.get_user_configs()
+            
+    processed = []
+    for uid, user_config in user_configs.items():
+        
+        # Determine whether it's a user or household config
+        if "members" in user_config:
+            kind = "households"
+        else:
+            kind = "users"
+
+        name = user_config["name"]
+
+        # Attribute and process this owner's transactions
+        df_owner = filter_and_process_owner_transactions(new_txn_df, user_config)
+
+        # Store structured result
+        processed.append({
+            "owner_name": name,
+            "kind": kind,
+            "uid": uid,
+            "transactions": df_owner
+        })
     
-    for doc in docs:
-        return doc.id  # first (and only) match
+    dropped_txn = check_processed(new_txn_df, processed)
+    if save_dropped:
+        fpath = Path("data") / 'dropped_txn.pkl'
+        fpath.parent.mkdir(parents=True, exist_ok=True)
+
+        dropped_txn.to_pickle(fpath)
+
+    return processed
+
+
+
+
+
+# def update_transactions(db, existing_transactions, new_transactions, 
+#                          start_date, end_date, config_json):
+#     """
+#     Update Firestore by replacing transactions for a given date range.
+
+#     Parameters
+#     ----------
+#     existing_transactions : pd.DataFrame
+#         Current loaded transactions.
+#     new_transactions : pd.DataFrame
+#         New Monarch transactions to process.
+#     start_date : datetime
+#         Start date for filtering.
+#     end_date : datetime
+#         End date for filtering.
+#     config_json : dict
+#         Configuration settings.
+
+#     Returns
+#     -------
+#     pd.DataFrame
+#         Updated combined transactions.
+#     """
+#     utc = pytz.UTC
+#     start_date = dt.fromisoformat(start_date).replace(tzinfo=utc)
+#     end_date = dt.fromisoformat(end_date).replace(tzinfo=utc)
     
-    return None
-
-
-
-def update_transactions(db, existing_transactions, new_transactions, 
-                         start_date, end_date, config_json):
-    """
-    Update Firestore by replacing transactions for a given date range.
-
-    Parameters
-    ----------
-    existing_transactions : pd.DataFrame
-        Current loaded transactions.
-    new_transactions : pd.DataFrame
-        New Monarch transactions to process.
-    start_date : datetime
-        Start date for filtering.
-    end_date : datetime
-        End date for filtering.
-    config_json : dict
-        Configuration settings.
-
-    Returns
-    -------
-    pd.DataFrame
-        Updated combined transactions.
-    """
-    utc = pytz.UTC
-    start_date = start_date.replace(tzinfo=utc)
-    end_date = end_date.replace(tzinfo=utc)
+#     uid = session.get("user_id")
+#     if not uid:
+#         raise ValueError("Error: User not logged in.")
     
-    uid = session.get("user_id")
-    if not uid:
-        raise ValueError("Error: User not logged in.")
+#     # Step 1: Prepare new_transactions
+#     new_transactions = preprocess_transactions(new_transactions)
     
-    config = json.loads(config_json)
+#     # Step 2: Load config
+#     config = json.loads(config_json)
+#     account_owner_map = config.get("account_owner", {})  #TODO now uses name ("The Andersons" not "joint")
 
-    # Find the user config by matching uid
-    user_config = None
-    user_name = None
-
-    for name, user_data in config["users"].items():
-        if user_data.get("uid") == uid:
-            user_config = user_data
-            user_name = name
-            break
-
-    if user_config is None or user_name is None:
-        raise ValueError("Error: No matching user config found for this UID.")
+#     # Step 3: Process user-specific transactions
     
-    household_config = config["users"].get("joint")
+#     # Find the user config by matching uid
+#     user_config = None
+#     user_name = None
 
-    if user_config is None:
-        raise ValueError(f"Error: No user config found for {user_name}")
+#     for name, user_data in config["users"].items():
+#         if user_data.get("uid") == uid:
+#             user_config = user_data
+#             user_name = name
+#             break
+    
+#     if user_config is None or user_name is None:
+#         raise ValueError(f"Error: No user config found for {user_name}")
+   
+#     user_accounts = [acct for acct, owner in account_owner_map.items() if owner == user_name]
 
-    if household_config is None:
-        raise ValueError("Error: No household config found for 'joint'")
+#     is_user_txn = new_transactions["account_name"].isin(user_accounts)
+#     user_txns = new_transactions.loc[is_user_txn].copy()
 
-    # Step 1: Prepare new_transactions
-    new_transactions["category_name"] = new_transactions["category"].apply(lambda x: x.get("name", "") if isinstance(x, dict) else "")
-    new_transactions["account_name"] = new_transactions["account"].apply(lambda x: x.get("displayName", "") if isinstance(x, dict) else "")
+#     user_txns["account_owner"] = name
+#     user_txns = categorize_transactions(user_txns, user_config)
+    
+#     # Step 4: Process joint household transactions
+#     household_config = config["users"].get("joint")
 
-    account_owner_map = config.get("account_owner", {})
+#     if household_config is None:
+#         raise ValueError("Error: No household config found for 'joint'")
 
-    # Get accounts where the owner matches the user
-    user_accounts = [acct for acct, owner in account_owner_map.items() if owner == user_name]
-    household_accounts = [acct for acct, owner in account_owner_map.items() if owner == "joint"]
+#     household_accounts = [acct for acct, owner in account_owner_map.items() if owner == "joint"]
 
-    # Which transactions belong where
-    is_user_txn = new_transactions["account_name"].isin(user_accounts)
-    is_joint_txn = new_transactions["account_name"].isin(household_accounts)
+#     is_joint_txn = new_transactions["account_name"].isin(household_accounts)
+#     joint_txns = new_transactions.loc[is_joint_txn].copy()
+    
+#     joint_txns["account_owner"] = "joint"  
+#     joint_txns = categorize_transactions(joint_txns, household_config)
 
-    # Split
-    user_txns = new_transactions.loc[is_user_txn].copy()
-    joint_txns = new_transactions.loc[is_joint_txn].copy()
+#     # Step 5: Delete old transactions from Firestore
 
-    # Process separately
-    user_txns = process_transactions(user_txns, user_config)
-    joint_txns = process_transactions(joint_txns, household_config)
+#     # Define collection refs
+#     user_ref = db.collection("users").document(uid).collection("transactions")
+#     household_id = find_household_for_user(db, uid)
+#     household_ref = db.collection("households").document(household_id).collection("transactions")
 
-    user_txns["account_owner"] = name
-    joint_txns["account_owner"] = "joint"
+#     # Filter old transactions
+#     filt = (existing_transactions['date'] >= start_date) & (existing_transactions['date'] <= end_date)
+#     old_txns = existing_transactions.loc[filt]
 
-    # Step 2: Delete old transactions from Firestore
+#     # Identify which ones belong to user vs joint
+#     old_user_txn_ids = old_txns.loc[old_txns['account_owner'] == user_config.get("name", "user"), "id"].tolist()
+#     old_joint_txn_ids = old_txns.loc[old_txns['account_owner'] == "joint", "id"].tolist()
 
-    # Define collection refs
-    user_ref = db.collection("users").document(uid).collection("transactions")
-    household_id = find_household_for_user(db, uid)
-    household_ref = db.collection("households").document(household_id).collection("transactions")
+#     # Delete them
+#     batch = db.batch()
+#     for txn_id in old_user_txn_ids:
+#         batch.delete(user_ref.document(str(txn_id)))
+#     for txn_id in old_joint_txn_ids:
+#         batch.delete(household_ref.document(str(txn_id)))
+#     batch.commit()
 
-    # Filter old transactions
-    filt = (existing_transactions['date'] >= start_date) & (existing_transactions['date'] <= end_date)
-    old_txns = existing_transactions.loc[filt]
+#     # Step 6: Upload new ones
+#     batch = db.batch()
+#     for txn in user_txns.drop(columns=["category", "account", "merchant"], errors="ignore").to_dict(orient="records"):
+#         batch.set(user_ref.document(str(txn["id"])), txn)
+#     for txn in joint_txns.drop(columns=["category", "account", "merchant"], errors="ignore").to_dict(orient="records"):
+#         batch.set(household_ref.document(str(txn["id"])), txn)
+#     batch.commit()
 
-    # Identify which ones belong to user vs joint
-    old_user_txn_ids = old_txns.loc[old_txns['account_owner'] == user_config.get("name", "user"), "id"].tolist()
-    old_joint_txn_ids = old_txns.loc[old_txns['account_owner'] == "joint", "id"].tolist()
+#     # Step 7: Update local combined dataset #TODO just reload from firestore to avoid branching
+#     filtered_transactions = existing_transactions.loc[~filt]
+#     updated_transactions = pd.concat([filtered_transactions, user_txns, joint_txns])
+#     updated_transactions = updated_transactions.sort_values('date', ascending=False)
 
-    # Delete them
-    batch = db.batch()
-    for txn_id in old_user_txn_ids:
-        batch.delete(user_ref.document(str(txn_id)))
-    for txn_id in old_joint_txn_ids:
-        batch.delete(household_ref.document(str(txn_id)))
-    batch.commit()
-
-    # Step 3: Upload new ones
-    batch = db.batch()
-    for txn in user_txns.drop(columns=["category", "account", "merchant"], errors="ignore").to_dict(orient="records"):
-        batch.set(user_ref.document(str(txn["id"])), txn)
-    for txn in joint_txns.drop(columns=["category", "account", "merchant"], errors="ignore").to_dict(orient="records"):
-        batch.set(household_ref.document(str(txn["id"])), txn)
-    batch.commit()
-
-    # Step 4: Update local combined dataset
-    filtered_transactions = existing_transactions.loc[~filt]
-    updated_transactions = pd.concat([filtered_transactions, user_txns, joint_txns])
-    updated_transactions = updated_transactions.sort_values('date', ascending=False)
-
-    return updated_transactions
+#     return updated_transactions
 
 
-def read_budget(config, user):
+def read_budget(config, user): # TODO read from dedicated session store in Dash?
     budget_dict = config['users'][user]['budget']
 
     budget = pd.DataFrame({

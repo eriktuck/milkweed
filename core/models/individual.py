@@ -2,7 +2,7 @@ import pandas as pd
 from .core import Stream, FinancialEntity
 from .healthcare import HealthCare
 from .business import Business
-import lib.utils.functions as functions
+import core.utils.functions as functions
 
 class Individual(FinancialEntity):
     """

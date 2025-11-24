@@ -4,13 +4,15 @@ from dash.exceptions import PreventUpdate
 import dash_bootstrap_components as dbc
 from datetime import datetime as dt
 from flask import session
-import json
 import pandas as pd
 from io import StringIO
 from dateutil.relativedelta import relativedelta
 
-from firebase import db
-from lib.utils import functions
+from core.models.session import SessionData
+from core.services.firebase import (
+    fetch_all_transactions
+)
+from core.utils import functions
 
 dash.register_page(__name__, path='/')
 
@@ -147,42 +149,11 @@ def upload_transactions(config_json):
     uid = session.get("user_id")
     if not uid:
         raise ValueError("Error: User not found")
-
-    # Find household where user is a member
-    household_query = (
-        db.collection("households")
-        .where("members", "array_contains", uid)
-        .limit(1)
-        .stream()
-    )
-    household_doc = next(household_query, None)
-    if not household_doc:
-        raise ValueError("Error: User not assigned to a household")
-
-    household_id = household_doc.id
-
-    all_txns = []
-
-    # Helper to fetch and label transactions
-    def fetch_transactions(collection_ref, owner_name):
-        for txn_doc in collection_ref.stream():
-            txn = txn_doc.to_dict()
-            txn["account_owner"] = owner_name
-            all_txns.append(txn)
-
-    # Personal transactions
-    user_doc = db.collection("users").document(uid).get()
-    user_name = user_doc.to_dict().get("name", "user") if user_doc.exists else "user"
-    fetch_transactions(db.collection("users").document(uid).collection("transactions"), user_name)
-
-    # Household transactions
-    fetch_transactions(db.collection("households").document(household_id).collection("transactions"), "joint")
-
-    # Return empty DataFrame if no transactions
-    if not all_txns:
-        return pd.DataFrame().to_json(date_format="iso", orient="split")
-
-    return pd.DataFrame(all_txns).to_json(date_format="iso", orient="split")
+    
+    config = SessionData.from_json(config_json)
+    all_txn = fetch_all_transactions(uid, config)
+    
+    return all_txn.to_json(date_format="iso", orient="split")
 
 
 @callback(
@@ -291,7 +262,7 @@ def adjust_date_range(back_clicks, forward_clicks, start_date, end_date,
      Input('date-picker-range', 'end_date'),
      Input('use-case', 'value')],
     [State('config-store', 'data')])
-def update_plot(transactions_data, start_date, end_date, user, config):
+def update_plot(transactions_data, start_date, end_date, user, config_json):
     """
 	Create or update budget chart.
 	
@@ -316,21 +287,21 @@ def update_plot(transactions_data, start_date, end_date, user, config):
         Resets the clickData property of the budget chart
 	"""    
     # Read config
-    config = json.loads(config)
+    config = SessionData.from_json(config_json)
     
     # Parse dates from calendar
     start_date = dt.fromisoformat(start_date)
     end_date = dt.fromisoformat(end_date)
     
     # Read budget
-    budget = functions.read_budget(config, user)
+    budget = functions.read_budget(config.data, user)
     
     # Read transactions
     transactions = pd.read_json(StringIO(transactions_data), orient='split')
     
     # Create budget report
     budget_report = functions.build_budget_report(
-        transactions, budget, start_date, end_date, config, user)
+        transactions, budget, start_date, end_date, config.data, user)
     
     if budget_report['amount'].abs().sum() == 0:
         return html.P("No transactions found.")

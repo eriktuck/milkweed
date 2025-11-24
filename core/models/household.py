@@ -4,7 +4,7 @@ from .core import FinancialEntity
 from .business import Business
 from .individual import Individual
 from .transactions import Transactions
-import lib.utils.functions as functions
+import core.utils.functions as functions
 
 class Household(FinancialEntity):
     def __init__(self, name, members: list[Individual], 

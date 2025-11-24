@@ -2,30 +2,21 @@ import dash
 from dash import html, dcc
 import dash_bootstrap_components as dbc
 from dash import html, dcc, callback, Input, Output, State
-import json
-from monarchmoney import MonarchMoney, RequireMFAException
 import asyncio
 import pandas as pd
 from datetime import datetime as dt
-from io import StringIO
-import uuid
-import pickle
-import base64
 from flask import session
 
-from firebase import db
-from lib.utils import functions
-
-
-def pickle_and_encode(obj):
-    pickled = pickle.dumps(obj)
-    encoded = base64.b64encode(pickled).decode('utf-8')
-    return encoded
-
-def decode_and_unpickle(encoded_str):
-    decoded = base64.b64decode(encoded_str)
-    obj = pickle.loads(decoded)
-    return obj
+from core.models.session import SessionData
+from core.services.firebase import (
+    sync_raw_transactions
+)
+from core.services.monarch import (
+    login_to_monarch,
+    fetch_transactions_from_monarch,
+    pickle_and_encode,
+    decode_and_unpickle
+)
 
 
 ### UI COMPONENTS ###
@@ -132,7 +123,7 @@ transaction_modal = dbc.Modal(
 )
 
 ### LAYOUT ###
-config = html.Div(
+sidebar = html.Div(
     [
         dbc.Container(
             dbc.Row(
@@ -172,100 +163,15 @@ def store_config(dummy):
     Returns
     -------
     str
-        JSON-serialized config object with structure like local config.json
+        JSON-serialized config object
     """
     uid = session.get("user_id")
     if not uid:
         raise ValueError("Error: User not found")
 
-    # Find the household where the user is a member
-    matching = (
-        db.collection("households")
-          .where("members", "array_contains", uid)
-          .limit(1)
-          .stream()
-    )
-    household_doc = next(matching, None)
-    if household_doc is None:
-        raise ValueError("Error: User not assigned to a household")
-    
-    household_data = household_doc.to_dict()
-    household_id = household_doc.id
-    members = household_data.get("members", [])
+    session_cache = SessionData.from_firestore(uid)
 
-    # Helper to fetch budgets
-    def fetch_budgets(ref):
-        budgets = {}
-        budget_docs = ref.collection("budgets").stream()
-        for doc in budget_docs:
-            year, month = doc.id.split("-")
-            year_dict = budgets.setdefault(year, {})
-            year_dict[int(month)] = doc.to_dict()
-        return budgets
-
-    config = {
-        "users": {},
-        "group_names": {},
-        "cat_names": {},
-        "account_owner": {}  # <-- Add account_owner mapping!
-    }
-
-    # Household (joint) budgets and settings
-    household_budgets = fetch_budgets(db.collection("households").document(household_id))
-    config["users"]["joint"] = {
-        "uid": "joint",
-        "budget": household_budgets,
-        "drop_cats": household_data.get("drop_cats", []),
-        "csp_from_group": household_data.get("csp_from_group", {}),
-        "csp_from_category": household_data.get("csp_from_category", {}),
-        "csp_labels": household_data.get("csp_labels", {}),
-        "cat_order": household_data.get("cat_order", []),
-        "group_names": household_data.get("group_names", {}),
-        "cat_names": household_data.get("cat_names", {}),
-        "accounts": household_data.get("accounts", [])
-    }
-
-    # Household accounts → owner is 'joint'
-    for acct in household_data.get("accounts", []):
-        config["account_owner"][acct] = "joint"
-
-    # Individual budgets and settings
-    for member_id in members:
-        user_ref = db.collection("users").document(member_id)
-        user_doc = user_ref.get()
-        if not user_doc.exists:
-            continue
-
-        user_data = user_doc.to_dict()
-        username = user_data.get("name", member_id)
-
-        # Save group_names and cat_names once
-        if not config["group_names"]:
-            config["group_names"] = user_data.get("group_names", {})
-        if not config["cat_names"]:
-            config["cat_names"] = user_data.get("cat_names", {})
-
-        user_budgets = fetch_budgets(user_ref)
-
-        config["users"][username] = {
-            "uid": member_id,
-            "budget": user_budgets,
-            "drop_cats": user_data.get("drop_cats", []),
-            "csp_from_group": user_data.get("csp_from_group", {}),
-            "csp_from_category": user_data.get("csp_from_category", {}),
-            "csp_labels": user_data.get("csp_labels", {}),
-            "cat_order": user_data.get("cat_order", []),
-            "group_names": user_data.get("group_names", {}),
-            "cat_names": user_data.get("cat_names", {}),
-            "accounts": user_data.get("accounts", [])
-        }
-
-        # User accounts → owner is username
-        for acct in user_data.get("accounts", []):
-            config["account_owner"][acct] = username
-
-    return json.dumps(config)
-
+    return session_cache.serialize()
 
 
 @callback(
@@ -274,13 +180,13 @@ def store_config(dummy):
     Input('config-store', 'data'),
     prevent_initial_call=True
 )
-def populate_use_case_dropdown(config):
+def populate_use_case_dropdown(config_json):
     """
     Populate the use-case dropdown from config.
 
     Parameters
     ----------
-    config : str
+    config_json : str
         JSON string of config from `config-store`.
 
     Returns
@@ -288,18 +194,24 @@ def populate_use_case_dropdown(config):
     list[dict], str
         Dropdown options, default value
     """
-    if not config:
+    if not config_json:
         raise dash.exceptions.PreventUpdate
+    
+    session_cache = SessionData.from_json(config_json)
+    user_configs = session_cache.get_user_configs()
 
-    config = json.loads(config)
-    user_keys = list(config.get("users", {}).keys())
+    if not user_configs:
+        print("No user configurations found in this session. Cannot update dropdown.")
 
-    # Create options for each user + add 'joint'
-    options = [{'label': user.title(), 'value': user} for user in user_keys]
-    if 'joint' not in user_keys:
-        options.append({'label': 'Joint', 'value': 'joint'})
+    # Create options for each user
+    options = [
+        {"label": user_config["name"].title(), "value": user_uid}
+        for user_uid, user_config in user_configs.items()
+    ]
 
-    return options, options[0]["value"] if options else None
+    default_value = options[0]["value"] if options else None
+
+    return options, default_value
 
 @callback(
     [Output("login-modal", "is_open"), 
@@ -372,64 +284,51 @@ def manage_and_handle_modals(
         if not username or not password:
             return True, False, "Please enter both username and password.", stored_transaction_data, None
         
-        async def login_to_monarch(email, password):
-            mm = MonarchMoney()
-            mm._headers['Device-UUID'] = '98d6a448-4798-437f-9927-950f643da374'
-            
-            try:
-                await mm.login(email=email, password=password, 
-                               use_saved_session=False, save_session=False)
-                # Pickle and store session data
-                print("LOGIN SUCCESSFUL")
-                return False, True, "", stored_transaction_data, pickle_and_encode(mm)
-            except Exception as e:
-                print(f"Login failed: {str(e)}")
-                return True, False, f"Login failed: {str(e)}", stored_transaction_data, None
-
-        return asyncio.run(login_to_monarch(username, password))
+        try:
+            mm = asyncio.run(login_to_monarch(username, password))
+            print("LOGIN SUCCESSFUL")
+            return (
+                False,  # show_login_modal
+                True,  # show_transaction_modal
+                "",
+                stored_transaction_data,
+                pickle_and_encode(mm),
+            )
+        except Exception as e:
+            print(f"Login failed: {str(e)}")
+            return (
+                True,  # show_login_modal
+                False,  # show_transaction_modal
+                f"Login failed: {str(e)}",
+                stored_transaction_data,
+                None,
+            )
     
     # Handle the fetch button
     if triggered_id == "fetch-button":
-        async def fetch_transactions(mm, start_date, end_date):
-            # Await the get_transactions call
-            transactions = await mm.get_transactions(start_date=start_date, end_date=end_date, limit=None)
-            
-            # Convert to dataframe
-            transactions = pd.DataFrame(transactions['allTransactions']['results'])
-            transactions['date'] = pd.to_datetime(transactions['date'], utc=True)
-
-            print(f'{len(transactions)} new transactions fetched from {transactions['date'].min()} to\
-                  {transactions['date'].max()}')
-
-            # Return results
-            return transactions
-
         try:
             if not session_data:
                 raise Exception("No valid session found")
 
             # Fetch transactions for selected dates
-            mm = decode_and_unpickle(session_data)      
-            new_transactions = asyncio.run(fetch_transactions(mm, start_date, end_date))
+            config = SessionData.from_json(config_json)
+            mm = decode_and_unpickle(session_data) 
+            txn_raw = asyncio.run(
+                fetch_transactions_from_monarch(mm, start_date, end_date)
+            )
 
-            # Update existing transactions with new transactions
-            existing_transactions = pd.read_json(StringIO(stored_transaction_data), orient='split')
-            start_date = dt.fromisoformat(start_date)
-            end_date = dt.fromisoformat(end_date)
-
-            # Update transactions and store in transaction-data-store
-            transactions = functions.update_transactions(
-                db, existing_transactions, new_transactions, 
-                start_date, end_date, config_json)
+            # Sync with Firestore
+            all_transactions = sync_raw_transactions(
+                txn_raw, config, start_date, end_date
+            )
             
-            print(transactions.iloc[0])
-            
-            transactions_json = transactions.to_json(date_format='iso', orient='split')
+            # Update transaction data store
+            transactions_json = all_transactions.to_json(date_format='iso', orient='split')
             return False, False, "", transactions_json, session_data
         
         except Exception as e:
             print(f"Failed to fetch transactions: {str(e)}")
             return False, True, "", stored_transaction_data, session_data
 
-    # # Default: Both modals closed
-    # return False, False, "", stored_transaction_data, session_data
+    # Default: Both modals closed
+    return False, False, "", stored_transaction_data, session_data

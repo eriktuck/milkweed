@@ -1,7 +1,7 @@
 import json
 import datetime
 import pandas as pd
-import lib.utils.functions as functions
+import core.utils.functions as functions
 
 
 class Transactions:
@@ -18,7 +18,7 @@ class Transactions:
                 config = json.load(f)
         
             # Read transactions
-            self._transactions = functions.process_transactions(
+            self._transactions = functions.categorize_transactions(
                 raw_transactions, config, self.name
                 )
 

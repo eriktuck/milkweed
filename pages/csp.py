@@ -12,7 +12,7 @@ from io import StringIO
 import dash_ag_grid as dag
 import calendar
 
-from lib.utils import functions
+from core.utils import functions
 
 CSP_GROUPS = ['Income', 'Fixed Costs', 'Investments', 'Savings', 'Guilt Free']
 HEADER_ROWS = CSP_GROUPS + ['Total']

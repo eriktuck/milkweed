@@ -13,7 +13,7 @@ from io import StringIO
 import dash_ag_grid as dag
 import calendar
 
-from lib.utils import functions
+from core.utils import functions
 
 dash.register_page(__name__, path='/trends')
 

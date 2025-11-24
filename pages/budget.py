@@ -9,7 +9,7 @@ import numpy as np
 import os
 import calendar
 
-from lib.utils import functions
+from core.utils import functions
 
 dash.register_page(__name__, path='/budget')
 

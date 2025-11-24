@@ -8,8 +8,9 @@ from dash import Dash, html, dcc
 import dash_bootstrap_components as dbc
 from firebase_admin import firestore
 
-from navbar import navbar
-from config import config
+from components.navbar import navbar
+from components.sidebar import sidebar
+
 
 # Load environment variables from Secret Manager content (if available)
 secrets_env_content = os.getenv("SECRETS_ENV")
@@ -24,9 +25,9 @@ if secrets_env_content:
     firebase_project_id = env_vars_from_secret.get("FIREBASE_PROJECT_ID")
     firebase_app_id = env_vars_from_secret.get("FIREBASE_APP_ID")
 else:
-    # Fallback to loading from a local file (for local development)
-    from dotenv import load_dotenv
+    print("Loading secrets from local env-file.")
     load_dotenv(dotenv_path=os.path.join("secrets", "env-file"))
+    # Fallback to loading from a local file (for local development) 
     firebase_api_key = os.getenv("FIREBASE_API_KEY")
     firebase_auth_domain = os.getenv("FIREBASE_AUTH_DOMAIN")
     firebase_project_id = os.getenv("FIREBASE_PROJECT_ID")
@@ -51,7 +52,7 @@ def protected_layout():
     
     return html.Div([
         navbar,
-        config,
+        sidebar,
         dash.page_container,
         dcc.Store(id='config-store', storage_type="session", data={"trigger": True}),
         dcc.Store(id='transaction-data-store'),
@@ -91,6 +92,6 @@ def logout():
     session.clear()
     return redirect(url_for("index"))
 
-# if __name__ == '__main__':
-#     app.run(host="0.0.0.0", port=8080, debug=False)
+if __name__ == '__main__':
+    app.run(host="0.0.0.0", port=8080, debug=True)
 
