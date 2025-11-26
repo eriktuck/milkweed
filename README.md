@@ -1,4 +1,65 @@
-# README
+# Milkweed 🌱
 
+**A self-hosted personal finance tool for living your Rich Life.**
 
-Relies on the excellent [monarchmoney](https://github.com/hammem/monarchmoney) by hammem.
+Milkweed is a personal finance application designed to help you implement the "Conscious Spending Plan" philosophy popularized by Ramit Sethi in *I Will Teach You To Be Rich*. Milkweed helps you track your fixed costs and investments so you can enjoy your **Guilt-Free Spending** without worry.
+
+Currently, this project is intended for developers or tech-savvy users to fork and host on their own infrastructure (Firebase + Google Cloud). Integration with the Monarch Money API supports transaction import.
+
+## Features
+
+### 📊 Planned vs. Actuals
+
+Visualize your spending to date at a glance. The dashboard features a bar chart comparing your **Planned** allocation against your **Actual** spending for the month. Instantly see if you are hitting your targets for Fixed Costs, Investments, Savings, and Guilt-Free Spending.
+
+![img](/home/eriktuck/Pictures/screenshot-2025-11-26_06-52-22.png)
+
+### 💰 Budget
+
+A spreadsheet-style interface where you can input your monthly income and expenses. The **Guilt-Free Button** at the top automatically assigns any unallocated budget to "Guilt-Free Spending." This is the money you can spend on dining out, travel, or whatever you love—guilt-free—because your obligations are already met.
+
+![img](/home/eriktuck/Pictures/screenshot-2025-11-26_06-52-51.png)
+
+### 💸 Conscious Spending Plan
+
+Automatically populate a **Conscious Spending Plan** with planned or actual amounts from transaction data or your budget. Make changes directly in the plan to explore scenarios.
+
+## Tech Stack
+
+- **Frontend/Hosting:** Google Cloud Run (Containerized Application)
+- **Backend/Database:** Google Firestore (NoSQL)
+- **Authentication:** Firebase Authentication
+
+## High-Level Setup
+
+Milkweed is designed to be self-hosted. You will own your data completely.
+
+> **Note:** A detailed, step-by-step guide on how to deploy this app on Firebase and Google Cloud Platform will be published on Medium soon. [Link coming soon].
+
+### Prerequisites
+
+- A Google Cloud Platform (GCP) Account.
+- `gcloud CLI` installed on your machine.
+
+### Quick Start Overview
+
+- **Fork this Repository:** Clone the repo to your local machine.
+- **Create a Firebase Project**
+  - Go to the [Firebase Console](https://console.firebase.google.com/) and create a new project.
+  - Enable **Authentication** (Google Sign-in or Email/Password).
+  - Enable **Cloud Firestore** and start in "Production mode" (you will need to set up security rules).
+- **Configure GCP**
+  - Ensure the Google Cloud Run API is enabled for your project.Install the dependencies and build the container image.
+- **Deploy**
+  - Deploy the service to **Google Cloud Run**.
+  - Set your environment variables (Firebase config keys) in the Cloud Run console.
+- **Run:** Open the URL provided by Cloud Run, create an account, and start building your Conscious Spending Plan.
+
+## Roadmap
+
+I am actively developing new features including:
+
+- **Spending Trends:** Historical views and projections to see how your "Rich Life" is evolving month-to-month
+- **Retirement Scenario Planning:** Go beyond the simple compound interest calculators to model a non-traditional approach to retirement. The scenario planning module supports complex scenarios while maintaining an intuitive user interface.
+- **Rental Income Analysis:** Tools for tracking income from real estate investments. 
+- **Net Worth & Portfolio Tracker:** automatically updates investment account values and supports analysis of diversification.
