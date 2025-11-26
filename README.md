@@ -4,7 +4,9 @@
 
 Milkweed is a personal finance application designed to help you implement the "Conscious Spending Plan" philosophy popularized by Ramit Sethi in *I Will Teach You To Be Rich*. Milkweed helps you track your fixed costs and investments so you can enjoy your **Guilt-Free Spending** without worry.
 
-Currently, this project is intended for developers or tech-savvy users to fork and host on their own infrastructure (Firebase + Google Cloud). Integration with the Monarch Money API supports transaction import.
+Currently, this project is intended for developers or tech-savvy users to fork and host on their own infrastructure (Firebase + Google Cloud). Integration with the Monarch Money API supports transaction import (using the excellent [monarchmoney](https://github.com/hammem/monarchmoney) library).
+
+> Do you have transactions but need them categorized? Try out my [transaction classifier](https://github.com/eriktuck/txn-classifier), a fine-tuned BERT classifier for IWT categories. 
 
 ## Features
 
