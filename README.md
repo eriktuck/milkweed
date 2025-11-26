@@ -12,13 +12,13 @@ Currently, this project is intended for developers or tech-savvy users to fork a
 
 Visualize your spending to date at a glance. The dashboard features a bar chart comparing your **Planned** allocation against your **Actual** spending for the month. Instantly see if you are hitting your targets for Fixed Costs, Investments, Savings, and Guilt-Free Spending.
 
-![img](/home/eriktuck/Pictures/screenshot-2025-11-26_06-52-22.png)
+![img](https://storage.googleapis.com/ei-dev-assets/assets/milkweed-pva.png)
 
 ### 💰 Budget
 
 A spreadsheet-style interface where you can input your monthly income and expenses. The **Guilt-Free Button** at the top automatically assigns any unallocated budget to "Guilt-Free Spending." This is the money you can spend on dining out, travel, or whatever you love—guilt-free—because your obligations are already met.
 
-![img](/home/eriktuck/Pictures/screenshot-2025-11-26_06-52-51.png)
+![img](https://storage.googleapis.com/ei-dev-assets/assets/milkweed-budget.png)
 
 ### 💸 Conscious Spending Plan
 
