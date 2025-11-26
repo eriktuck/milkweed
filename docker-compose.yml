@@ -6,8 +6,8 @@ services:
     container_name: budgetbaby
     ports:
       - "8080:8080"
-    env_file:
-      - secrets/env-file
+    environment:
+      - ENV_PATH=/app/secrets/env-file
     volumes:
       - ./secrets:/app/secrets
     restart: unless-stopped

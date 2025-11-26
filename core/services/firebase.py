@@ -15,30 +15,44 @@ from core.utils.functions import (
 
 # Prevent multiple initializations
 if not firebase_admin._apps:
+    # 1. Try to get the JSON string from Environment (Cloud Run secret variable)
     firebase_credentials_json = os.environ.get("FIREBASE_CREDENTIALS")
+    
+    # 2. Try to get the path to a key file (Local dev or Mounted Secret)
+    # We check the specific variable or fall back to your local default
+    service_account_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "secrets/firebase-service-account")
 
     if firebase_credentials_json:
-        # Load credentials from the environment variable (Cloud Run)
+        # Scenario A: Credentials passed as a raw JSON string (Env Var)
         try:
-            cred = credentials.Certificate(json.loads(firebase_credentials_json))
+            cred_dict = json.loads(firebase_credentials_json)
+            cred = credentials.Certificate(cred_dict)
             firebase_admin.initialize_app(cred)
-            print("Firebase app initialized from environment variable.")
+            print("Firebase initialized via FIREBASE_CREDENTIALS env var.")
         except json.JSONDecodeError:
-            raise ValueError("Error decoding Firebase credentials from environment variable.")
-    else:
-        # Load credentials from the local file (local development)
+            print("Error: FIREBASE_CREDENTIALS contains invalid JSON.")
+            raise
+
+    elif os.path.exists(service_account_path):
+        # Scenario B: Credentials found in a file (Local Dev or Mounted Volume)
         try:
-            cred = credentials.Certificate(
-                os.path.join("secrets", "firebase-service-account")
-            )
+            cred = credentials.Certificate(service_account_path)
             firebase_admin.initialize_app(cred)
-            print("Firebase app initialized from local file.")
-        except FileNotFoundError:
-            raise ValueError(
-                "Firebase service account file not found at secrets/firebase-service-account"
-            )
+            print(f"Firebase initialized via file at {service_account_path}.")
         except Exception as e:
-            raise ValueError(f"Error loading Firebase credentials from file: {e}")
+            print(f"Error loading credentials file: {e}")
+            raise
+
+    else:
+        # Scenario C: Application Default Credentials (ADC)
+        # This is the "Magic" Cloud Run mode. If no keys are provided, 
+        # it uses the identity of the Cloud Run instance itself.
+        print("No explicit credentials found. Attempting Application Default Credentials (ADC)...")
+        try:
+            firebase_admin.initialize_app()
+            print("Firebase initialized via ADC.")
+        except Exception as e:
+            raise ValueError(f"Could not initialize Firebase. No keys found and ADC failed: {e}")
 
 db = firestore.client()
 

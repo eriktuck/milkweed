@@ -4,12 +4,12 @@ import asyncio
 from pathlib import Path
 from monarchmoney import MonarchMoney
 
-env_path = Path('./secrets/.env')
+env_path = Path('./secrets/env-file')
 load_dotenv(dotenv_path=env_path)
 
 async def main():
     mm = MonarchMoney()
-    mm._headers['Device-UUID'] = '98d6a448-4798-437f-9927-950f643da374'
+    mm._headers['Device-UUID'] = os.getenv('MILKWEED_DEVICE_UUID')
 
     username = os.getenv("USERNAME")
     password = os.getenv("PASSWORD")

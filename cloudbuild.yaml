@@ -15,7 +15,8 @@ steps:
     - --region=us-central1
     - --platform=managed
     - --allow-unauthenticated
-    - --set-secrets=SECRETS_ENV=env-file:latest,FIREBASE_CREDENTIALS=firebase-service-account:latest
+    - --set-secrets=/secrets/env-file=env-file:latest
+    - --set-secrets=FIREBASE_CREDENTIALS=firebase-service-account:latest
     - --set-env-vars=GOOGLE_CLOUD_PROJECT=$PROJECT_ID,ENV_PATH=/secrets/env-file
 
 options:

@@ -1,12 +1,14 @@
 import pandas as pd
 import monarchmoney
 from monarchmoney import MonarchMoney
-import asyncio
 from pathlib import Path
 from datetime import date, datetime
 from typing import Any, Optional, List, Tuple
 import pickle
 import base64
+from dotenv import load_dotenv
+import os
+import asyncio
 
 def pickle_and_encode(obj):
     pickled = pickle.dumps(obj)
@@ -37,7 +39,14 @@ async def login_to_monarch(email: str, password: str) -> MonarchMoney:
         An authenticated MonarchMoney instance.
     """
     mm = MonarchMoney()
-    mm._headers['Device-UUID'] = '98d6a448-4798-437f-9927-950f643da374'
+    
+    # Get device UUID
+    env_path_str = os.getenv('ENV_PATH', './secrets/env-file')
+    env_path = Path(env_path_str)
+    load_dotenv(dotenv_path=env_path)
+
+    device_uuid = os.environ.get('MILKWEED_DEVICE_UUID')
+    mm._headers['Device-UUID'] = device_uuid
 
     await mm.login(
         email=email, 

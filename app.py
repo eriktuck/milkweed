@@ -1,37 +1,22 @@
 from flask import Flask, request, session, render_template, redirect, url_for
-from dotenv import load_dotenv, dotenv_values
 import firebase_admin
-from firebase_admin import credentials, auth
+from firebase_admin import credentials, auth, firestore
 import os
 import dash
 from dash import Dash, html, dcc
 import dash_bootstrap_components as dbc
-from firebase_admin import firestore
+from pathlib import Path
+
+from dotenv import load_dotenv
+load_dotenv(os.getenv("ENV_PATH", "secrets/env-file"))
 
 from components.navbar import navbar
 from components.sidebar import sidebar
 
-
-# Load environment variables from Secret Manager content (if available)
-secrets_env_content = os.getenv("SECRETS_ENV")
-if secrets_env_content:
-    env_vars_from_secret = {}
-    for line in secrets_env_content.splitlines():
-        if "=" in line:
-            key, value = line.strip().split("=", 1)
-            env_vars_from_secret[key] = value
-    firebase_api_key = env_vars_from_secret.get("FIREBASE_API_KEY")
-    firebase_auth_domain = env_vars_from_secret.get("FIREBASE_AUTH_DOMAIN")
-    firebase_project_id = env_vars_from_secret.get("FIREBASE_PROJECT_ID")
-    firebase_app_id = env_vars_from_secret.get("FIREBASE_APP_ID")
-else:
-    print("Loading secrets from local env-file.")
-    load_dotenv(dotenv_path=os.path.join("secrets", "env-file"))
-    # Fallback to loading from a local file (for local development) 
-    firebase_api_key = os.getenv("FIREBASE_API_KEY")
-    firebase_auth_domain = os.getenv("FIREBASE_AUTH_DOMAIN")
-    firebase_project_id = os.getenv("FIREBASE_PROJECT_ID")
-    firebase_app_id = os.getenv("FIREBASE_APP_ID")
+firebase_api_key = os.getenv("FIREBASE_API_KEY")
+firebase_auth_domain = os.getenv("FIREBASE_AUTH_DOMAIN")
+firebase_project_id = os.getenv("FIREBASE_PROJECT_ID")
+firebase_app_id = os.getenv("FIREBASE_APP_ID")
 
 # Init Flask
 server = Flask(__name__)
