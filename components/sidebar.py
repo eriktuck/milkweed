@@ -178,9 +178,10 @@ def store_config(dummy):
     Output('use-case', 'options'),
     Output('use-case', 'value'),
     Input('config-store', 'data'),
+    State('use-case', 'value'),
     prevent_initial_call=True
 )
-def populate_use_case_dropdown(config_json):
+def populate_use_case_dropdown(config_json, current_value):
     """
     Populate the use-case dropdown from config.
 
@@ -196,7 +197,7 @@ def populate_use_case_dropdown(config_json):
     """
     if not config_json:
         raise dash.exceptions.PreventUpdate
-    
+
     session_cache = SessionData.from_json(config_json)
     user_configs = session_cache.get_user_configs()
 
@@ -209,9 +210,10 @@ def populate_use_case_dropdown(config_json):
         for user_uid, user_config in user_configs.items()
     ]
 
-    default_value = options[0]["value"] if options else None
+    valid_values = {opt["value"] for opt in options}
+    value = current_value if current_value in valid_values else (options[0]["value"] if options else None)
 
-    return options, default_value
+    return options, value
 
 @callback(
     [Output("login-modal", "is_open"), 
