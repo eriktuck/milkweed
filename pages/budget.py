@@ -51,7 +51,7 @@ save_budget = dbc.Button(
     "Save Budget",
     id='save-budget',
     size="md",
-    color="secondary",
+    color="light",
     class_name="me-md-2",
     disabled=True,
 )
@@ -594,4 +594,4 @@ def preview_new_budget(n_clicks, new_year, methods, pcts, config_json, user, tra
 def update_save_button_state(cell_changed, assign_clicks, save_clicks, year, user):
     if ctx.triggered_id in ("my-grid", "assign-gf"):
         return "primary", False
-    return "secondary", True
+    return "light", True
