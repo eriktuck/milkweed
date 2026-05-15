@@ -109,6 +109,7 @@ layout = html.Div([
                 dbc.Col(year_dropdown, width=2),
                 dbc.Col(add_new_button, width=2, className="d-flex align-items-center"),
             ], className="pt-3 pb-3"),
+        html.Div(id="budget-no-data-message"),
         html.Div(remaining_to_budget, className="d-grid pb-3"),
         html.Div(grid, style={"height": "calc(100vh - 300px)"}),
         html.Div(
@@ -141,8 +142,8 @@ def initialize_budget_year(user, budget_year, config):
         for year in budget_years
     ]
 
-    if not budget_year:
-        budget_year=str(budget_years[-1]) if budget_years else None
+    if not budget_year or budget_year not in {str(y) for y in budget_years}:
+        budget_year = str(budget_years[-1]) if budget_years else None
 
     return options, budget_year
 
@@ -150,16 +151,26 @@ def initialize_budget_year(user, budget_year, config):
 @callback(
     [Output("my-grid", "rowData"),
      Output("my-grid", "columnDefs"),
-     Output("my-grid", "getRowStyle")],
+     Output("my-grid", "getRowStyle"),
+     Output("budget-no-data-message", "children")],
     Input("budget-year", "value"),
     State('config-store', 'data'),
     State('use-case', 'value')
 )
-def populate_budget(year, config, user):    
+def populate_budget(year, config, user):
+    if year is None:
+        no_data_msg = dbc.Alert("No budget found for this user.", color="info", className="mb-3")
+        return [], [], {}, no_data_msg
+
     year = int(year)
     config = json.loads(config)
     budget = functions.read_budget(config, user)
-    
+
+    year_cols = [(year, m) for m in range(1, 13) if (year, m) in budget.columns]
+    if not year_cols:
+        no_data_msg = dbc.Alert(f"No budget found for {year}.", color="info", className="mb-3")
+        return [], [], {}, no_data_msg
+
     budget = budget.loc[:, (year, 1):(year, 12)]
 
     budget.columns = [
@@ -216,7 +227,7 @@ def populate_budget(year, config, user):
             },
         ]}
 
-    return row_data, columnDefs, getRowStyle
+    return row_data, columnDefs, getRowStyle, None
 
 
 @callback(
