@@ -1,5 +1,5 @@
 import dash
-from dash import html, dcc, callback, Input, Output, State, ctx, Patch
+from dash import html, dcc, callback, Input, Output, State, ctx, Patch, ALL
 from dash.exceptions import PreventUpdate
 import dash_bootstrap_components as dbc
 import dash_ag_grid as dag
@@ -8,6 +8,7 @@ import pandas as pd
 import numpy as np
 import os
 import calendar
+from io import StringIO
 
 from core.utils import functions
 
@@ -15,6 +16,7 @@ dash.register_page(__name__, path='/budget')
 
 CSP_GROUPS = ['Income', 'Fixed Costs', 'Investments', 'Savings', 'Guilt Free']
 HEADER_ROWS = CSP_GROUPS + ['Total']
+NON_BUDGETABLE = {'Total Income', 'Total Expenses', 'Total Spending', 'Unbudgeted'}
 
 ### UI COMPONENTS ###
 year_dropdown = dcc.Dropdown(
@@ -54,13 +56,58 @@ save_budget = dbc.Button(
     disabled=False,
 )
 
+add_new_button = dbc.Button(
+    "Add New",
+    id="open-new-budget-modal",
+    size="md",
+    color="success",
+)
+
+new_budget_modal = dbc.Modal(
+    [
+        dbc.ModalHeader(dbc.ModalTitle("Add New Budget")),
+        dbc.ModalBody([
+            dbc.Row([
+                dbc.Col([
+                    dbc.Label("Budget Year"),
+                    dbc.Input(
+                        id="new-budget-year",
+                        type="number",
+                        min=2000,
+                        max=2100,
+                        step=1,
+                    ),
+                ], width=3),
+            ], className="mb-4"),
+            html.Div(id="new-budget-warning", className="mb-3"),
+            html.Div(
+                id="new-budget-category-table",
+                style={"maxHeight": "55vh", "overflowY": "auto"},
+            ),
+        ]),
+        dbc.ModalFooter(
+            dbc.Button(
+                "Preview",
+                id="preview-new-budget",
+                color="primary",
+            ),
+        ),
+    ],
+    id="new-budget-modal",
+    size="xl",
+    is_open=False,
+    scrollable=False,
+)
+
 ### LAYOUT ###
 layout = html.Div([
+    new_budget_modal,
     dbc.Container([
         dbc.Row(
             [
-                dbc.Col(html.H1('Budget'), width=10),
-                dbc.Col(year_dropdown, width=2)
+                dbc.Col(html.H1('Budget'), width=8),
+                dbc.Col(year_dropdown, width=2),
+                dbc.Col(add_new_button, width=2, className="d-flex align-items-center"),
             ], className="pt-3 pb-3"),
         html.Div(remaining_to_budget, className="d-grid pb-3"),
         html.Div(grid, style={"height": "calc(100vh - 300px)"}),
@@ -299,3 +346,229 @@ def save_budget(n, row_data, config, budget_year, user):
 
         return json.dumps(existing_config)
 
+
+@callback(
+    Output("new-budget-modal", "is_open"),
+    Input("open-new-budget-modal", "n_clicks"),
+    State("new-budget-modal", "is_open"),
+    prevent_initial_call=True,
+)
+def toggle_new_budget_modal(n_clicks, is_open):
+    return not is_open
+
+
+@callback(
+    Output("new-budget-year", "value"),
+    Input("new-budget-modal", "is_open"),
+    State("config-store", "data"),
+    State("use-case", "value"),
+    prevent_initial_call=True,
+)
+def initialize_new_budget_year(is_open, config, user):
+    if not is_open:
+        raise PreventUpdate
+    config = json.loads(config)
+    budget_dict = config["users"][user]['budget']
+    years = [int(y) for y in budget_dict.keys()]
+    return max(years) + 1 if years else 2025
+
+
+@callback(
+    Output("new-budget-category-table", "children"),
+    Input("new-budget-modal", "is_open"),
+    State("config-store", "data"),
+    State("use-case", "value"),
+    prevent_initial_call=True,
+)
+def populate_category_table(is_open, config, user):
+    if not is_open:
+        raise PreventUpdate
+
+    config = json.loads(config)
+    cat_order = config["users"][user]['cat_order']
+
+    header_style = {
+        "backgroundColor": "#4a5568",
+        "color": "white",
+        "fontWeight": "bold",
+        "padding": "6px 12px",
+    }
+
+    rows = []
+    for category in cat_order:
+        if category in CSP_GROUPS:
+            rows.append(html.Tr(
+                html.Td(category, colSpan=3, style=header_style)
+            ))
+        elif category in NON_BUDGETABLE:
+            continue
+        else:
+            rows.append(html.Tr([
+                html.Td(category, style={"padding": "4px 12px", "verticalAlign": "middle"}),
+                html.Td(
+                    dbc.Select(
+                        id={'type': 'new-budget-method', 'index': category},
+                        options=[
+                            {'label': 'Copy LY Actuals', 'value': 'copy_actuals'},
+                            {'label': 'Copy LY Budget', 'value': 'copy_budget'},
+                            {'label': 'Manual', 'value': 'manual'},
+                        ],
+                        value='copy_actuals',
+                        size='sm',
+                    ),
+                    style={"padding": "4px 12px"},
+                ),
+                html.Td(
+                    dbc.InputGroup([
+                        dbc.Input(
+                            id={'type': 'new-budget-pct', 'index': category},
+                            type='number',
+                            value=100,
+                            min=0,
+                            step=1,
+                        ),
+                        dbc.InputGroupText('%'),
+                    ], size='sm'),
+                    style={"padding": "4px 12px", "width": "130px"},
+                ),
+            ]))
+
+    thead = html.Thead(
+        html.Tr([
+            html.Th("Category"),
+            html.Th("Method"),
+            html.Th("% Adj", style={"width": "130px"}),
+        ]),
+        style={"position": "sticky", "top": 0, "backgroundColor": "white", "zIndex": 1},
+    )
+
+    return dbc.Table(
+        [thead, html.Tbody(rows)],
+        bordered=True,
+        hover=True,
+        size='sm',
+        className="mb-0",
+    )
+
+
+@callback(
+    Output("new-budget-warning", "children"),
+    Input("new-budget-modal", "is_open"),
+    State("config-store", "data"),
+    State("use-case", "value"),
+    State("transaction-data-store", "data"),
+    prevent_initial_call=True,
+)
+def show_unbudgeted_warning(is_open, config_json, user, transactions_data):
+    if not is_open or not transactions_data:
+        raise PreventUpdate
+
+    config = json.loads(config_json)
+    budget_years = [int(y) for y in config["users"][user]['budget'].keys()]
+    ly = max(budget_years) if budget_years else None
+    if ly is None:
+        raise PreventUpdate
+
+    df = pd.read_json(StringIO(transactions_data), orient='split')
+    df['date'] = pd.to_datetime(df['date'])
+    filt = (df['date'].dt.year == ly) & (df['account_owner'] == user) & (df['csp'] == 'guilt_free')
+    unbudgeted_total = df.loc[filt, 'amount'].sum()
+
+    if unbudgeted_total <= 0:
+        raise PreventUpdate
+
+    return dbc.Alert(
+        f"${unbudgeted_total:,.0f} in unbudgeted (catch-all) spending in {ly}. "
+        "Consider adding line items for recurring spend before previewing.",
+        color="warning",
+        className="mb-0",
+    )
+
+
+@callback(
+    Output("new-budget-modal", "is_open", allow_duplicate=True),
+    Output("budget-year", "options", allow_duplicate=True),
+    Output("budget-year", "value", allow_duplicate=True),
+    Output("config-store", "data", allow_duplicate=True),
+    Input("preview-new-budget", "n_clicks"),
+    State("new-budget-year", "value"),
+    State({'type': 'new-budget-method', 'index': ALL}, 'value'),
+    State({'type': 'new-budget-pct', 'index': ALL}, 'value'),
+    State("config-store", "data"),
+    State("use-case", "value"),
+    State("transaction-data-store", "data"),
+    State("budget-year", "options"),
+    prevent_initial_call=True,
+)
+def preview_new_budget(n_clicks, new_year, methods, pcts, config_json, user, transactions_data, current_options):
+    if n_clicks is None:
+        raise PreventUpdate
+
+    config = json.loads(config_json)
+    new_year = int(new_year)
+    ly = new_year - 1
+
+    cat_order = config["users"][user]['cat_order']
+    categories = [c for c in cat_order if c not in CSP_GROUPS and c not in NON_BUDGETABLE]
+
+    method_map = dict(zip(categories, methods))
+    pct_map = {cat: (pcts[i] or 100) / 100 for i, cat in enumerate(categories)}
+
+    # LY budget — slice only existing columns to avoid KeyError
+    budget = functions.read_budget(config, user)
+    ly_cols = [(ly, m) for m in range(1, 13) if (ly, m) in budget.columns]
+    ly_budget = budget[ly_cols] if ly_cols else pd.DataFrame(index=budget.index)
+
+    # LY actuals — only parse transactions if any category uses copy_actuals
+    ly_actuals = {}
+    if 'copy_actuals' in methods and transactions_data:
+        df = pd.read_json(StringIO(transactions_data), orient='split')
+        df['date'] = pd.to_datetime(df['date'])
+        filt = (df['date'].dt.year == ly) & (df['account_owner'] == user)
+        ly_actuals = df.loc[filt].groupby('csp')['amount'].sum().abs().to_dict()
+
+    new_budget_months = {m: {} for m in range(1, 13)}
+
+    for category in categories:
+        method = method_map.get(category, 'copy_actuals')
+        pct = pct_map[category]
+
+        if method == 'manual':
+            continue
+
+        # Retrieve LY monthly budget values for this category
+        monthly_budgets = []
+        for month in range(1, 13):
+            col = (ly, month)
+            if col in ly_budget.columns and category in ly_budget.index:
+                val = ly_budget.loc[category, col]
+                val = 0.0 if pd.isna(val) else float(val)
+            else:
+                val = 0.0
+            monthly_budgets.append(val)
+
+        if method == 'copy_budget':
+            for month, val in enumerate(monthly_budgets, start=1):
+                new_budget_months[month][category] = round(val * pct, 2)
+
+        elif method == 'copy_actuals':
+            total_budget = sum(monthly_budgets)
+            if total_budget > 0:
+                loading = [b / total_budget for b in monthly_budgets]
+            else:
+                loading = [1 / 12] * 12
+            ly_total = float(ly_actuals.get(category, 0.0))
+            for i, month in enumerate(range(1, 13)):
+                new_budget_months[month][category] = round(ly_total * loading[i] * pct, 2)
+
+    config["users"][user]['budget'][str(new_year)] = {
+        str(month): values for month, values in new_budget_months.items()
+    }
+
+    existing_values = {opt['value'] for opt in current_options}
+    if str(new_year) not in existing_values:
+        new_options = current_options + [{'label': str(new_year), 'value': str(new_year)}]
+    else:
+        new_options = current_options
+
+    return False, new_options, str(new_year), json.dumps(config)
