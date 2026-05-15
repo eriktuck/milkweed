@@ -285,7 +285,10 @@ def update_plot(transactions_data, start_date, end_date, user, config_json):
 	    Budget chart
     None
         Resets the clickData property of the budget chart
-	"""    
+	"""
+    if not user or not transactions_data or not config_json:
+        raise PreventUpdate
+
     # Read config
     config = SessionData.from_json(config_json)
     

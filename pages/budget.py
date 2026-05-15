@@ -6,11 +6,11 @@ import dash_ag_grid as dag
 import json
 import pandas as pd
 import numpy as np
-import os
 import calendar
 from io import StringIO
 
 from core.utils import functions
+from core.services.firebase import save_budget_to_firestore
 
 dash.register_page(__name__, path='/budget')
 
@@ -313,38 +313,35 @@ def assign_to_guilt_free(n, row_data):
 def save_budget(n, row_data, config, budget_year, user):
     if n is None:
         raise PreventUpdate
-    else:
-        existing_config = json.loads(config)
-        budget = pd.DataFrame(row_data).set_index('category')
-        budget = budget.drop(columns=['csp_label', 'id'], index=CSP_GROUPS)
 
-        month_mapping = {
-            "Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "May": 5, "Jun": 6,
-            "Jul": 7, "Aug": 8, "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12
-        }
+    existing_config = json.loads(config)
+    budget = pd.DataFrame(row_data).set_index('category')
+    budget = budget.drop(columns=['csp_label', 'id'], index=CSP_GROUPS)
 
-        budget = budget.reset_index().melt(
-            id_vars="category", var_name="month", value_name="value"
-        ).set_index('category')
+    month_mapping = {
+        "Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "May": 5, "Jun": 6,
+        "Jul": 7, "Aug": 8, "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12
+    }
 
-        budget['month'] = budget['month'].map(month_mapping)
-        budget['month'] = budget['month'].astype(int)
+    budget = budget.reset_index().melt(
+        id_vars="category", var_name="month", value_name="value"
+    ).set_index('category')
 
-        # Group by year, month, and category
-        grouped = budget.groupby(['month', budget.index])['value'].sum()
+    budget['month'] = budget['month'].map(month_mapping).astype(int)
 
-        # Convert to nested JSON-like dictionary
-        config = {budget_year: {}}
+    grouped = budget.groupby(['month', budget.index])['value'].sum()
 
-        for (month, category), value in grouped.items():
-            config[budget_year].setdefault(month, {})[category] = value   
-        
-        existing_config["users"][user]['budget'][budget_year] = config[budget_year]
+    budget_by_month = {}
+    for (month, category), value in grouped.items():
+        budget_by_month.setdefault(month, {})[category] = value
 
-        with open(os.path.join('data', 'config.json'), 'w') as f:
-            json.dump(existing_config, f, indent=4)
+    existing_config["users"][user]['budget'][budget_year] = budget_by_month
 
-        return json.dumps(existing_config)
+    collection_str = "households" if "members" in existing_config["users"][user] else "users"
+    uid = existing_config["users"][user]["uid"]
+    save_budget_to_firestore(collection_str, uid, budget_year, budget_by_month)
+
+    return json.dumps(existing_config)
 
 
 @callback(

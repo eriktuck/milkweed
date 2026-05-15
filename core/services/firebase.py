@@ -165,6 +165,23 @@ def commit_in_batches(items, write_fn, batch_size=400):
         batch.commit()
 
 
+def save_budget_to_firestore(collection_str: str, uid: str, year: str | int, budget_data: dict):
+    """Write/overwrite all monthly budget documents for one year.
+
+    budget_data: {month (int or str): {category: value}}
+    Documents are named '{year}-{month}' and fully replaced on each save.
+    """
+    ref = db.collection(collection_str).document(uid).collection("budgets")
+
+    def _write(batch, item):
+        month, categories = item
+        doc_id = f"{year}-{int(month):02d}"
+        clean = {k: float(v) for k, v in categories.items() if v is not None and v == v}
+        batch.set(ref.document(doc_id), clean)
+
+    commit_in_batches(budget_data.items(), _write)
+
+
 def update_firestore_transactions(
         collection_str: str, 
         uid: str, 

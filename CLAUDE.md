@@ -13,8 +13,14 @@ Milkweed is a self-hosted personal finance dashboard built on Plotly Dash (with 
 python app.py
 
 # Run locally against the Firebase emulator (safe, no prod writes)
-firebase emulators:start                          # terminal 1 — UI at http://localhost:4000
-ENV_PATH=secrets/env-file.dev uv run python app.py  # terminal 2
+firebase emulators:start --import=./emulator-data --export-on-exit  # terminal 1 — UI at http://localhost:4000
+ENV_PATH=secrets/env-file.dev uv run python app.py                  # terminal 2
+
+# Seed the emulator from prod (first time, or to refresh from prod)
+# Run with emulator already started, before launching the app
+uv run python -m scripts.seed_emulator                      # transactions from 2025-01-01
+uv run python -m scripts.seed_emulator --start-date 2024-01-01  # wider range
+# After seeding: firebase emulators:export ./emulator-data (to persist for next session)
 
 # Run with Docker Compose (prod — mirrors Cloud Run)
 docker compose up --build
