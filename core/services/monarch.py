@@ -8,7 +8,6 @@ import pickle
 import base64
 from dotenv import load_dotenv
 import os
-import asyncio
 
 def pickle_and_encode(obj):
     pickled = pickle.dumps(obj)

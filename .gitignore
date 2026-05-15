@@ -49,3 +49,6 @@ env-file
 # Markdwon
 *.md
 !README.md
+
+# Temp scripts
+tmp/
