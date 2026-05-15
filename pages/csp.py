@@ -21,8 +21,9 @@ dash.register_page(__name__, path='/csp')
 
 grid = dag.AgGrid(
     id="csp-grid",
+    className="ag-theme-quartz",
     defaultColDef={"editable": True, "sortable": False},
-    style={"width": "auto", "flex": "1"},
+    style={"width": "100%", "height": "100%"},
     getRowId="params.data.id",
     dashGridOptions={
         "domLayout": "normal",
@@ -36,14 +37,8 @@ grid = dag.AgGrid(
 
 layout = html.Div([
     dbc.Container([
-            dbc.Row(html.H1('Conscious Spending Plan'), className="pt-3 pb-3"),
-            dbc.Row(
-                [
-                    dbc.Col(width=1),
-                    dbc.Col(grid, style={"height": "75vh", "display": "flex", "flexDirection": "column", }, width=10),
-                    dbc.Col(width=1)
-                ]
-            )
+        dbc.Row(html.H1('Conscious Spending Plan'), className="pt-3 pb-3"),
+        html.Div(grid, style={"height": "calc(100vh - 200px)"}),
     ])
 ])
 
@@ -141,7 +136,11 @@ def populate_csp(config):
         "styleConditions": [
             {
                 "condition": f"{HEADER_ROWS}.includes(params.data.category)",
-                "style": {"backgroundColor": "#333", "color": "white", "font-weight": "bold"},
+                "style": {"backgroundColor": "#4a5568", "color": "white", "fontWeight": "bold"},
+            },
+            {
+                "condition": "params.rowIndex % 2 === 1",
+                "style": {"backgroundColor": "#f4f6f8"},
             },
         ]}
 
