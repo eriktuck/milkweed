@@ -32,8 +32,9 @@ remaining_to_budget = dbc.Button(
 
 grid = dag.AgGrid(
     id="my-grid",
+    className="ag-theme-quartz",
     defaultColDef={"editable": True, "sortable": False},
-    style={"width": "100%", "flex": "1"},
+    style={"width": "100%", "height": "100%"},
     getRowId="params.data.id",
     dashGridOptions={
         "domLayout": "normal",
@@ -62,7 +63,7 @@ layout = html.Div([
                 dbc.Col(year_dropdown, width=2)
             ], className="pt-3 pb-3"),
         html.Div(remaining_to_budget, className="d-grid pb-3"),
-        html.Div(grid, style={"height": "65vh", "display": "flex", "flexDirection": "column"}),
+        html.Div(grid, style={"height": "calc(100vh - 300px)"}),
         html.Div(
             [
                 save_budget
@@ -160,7 +161,11 @@ def populate_budget(year, config, user):
         "styleConditions": [
             {
                 "condition": f"{HEADER_ROWS}.includes(params.data.category)",
-                "style": {"backgroundColor": "#333", "color": "white", "font-weight": "bold"},
+                "style": {"backgroundColor": "#4a5568", "color": "white", "fontWeight": "bold"},
+            },
+            {
+                "condition": "params.rowIndex % 2 === 1",
+                "style": {"backgroundColor": "#f4f6f8"},
             },
         ]}
 
