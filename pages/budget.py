@@ -51,9 +51,9 @@ save_budget = dbc.Button(
     "Save Budget",
     id='save-budget',
     size="md",
-    color="primary",
+    color="secondary",
     class_name="me-md-2",
-    disabled=False,
+    disabled=True,
 )
 
 add_new_button = dbc.Button(
@@ -580,3 +580,18 @@ def preview_new_budget(n_clicks, new_year, methods, pcts, config_json, user, tra
         new_options = current_options
 
     return False, new_options, str(new_year), json.dumps(config)
+
+
+@callback(
+    Output("save-budget", "color"),
+    Output("save-budget", "disabled"),
+    Input("my-grid", "cellValueChanged"),
+    Input("assign-gf", "n_clicks"),
+    Input("save-budget", "n_clicks"),
+    Input("budget-year", "value"),
+    Input("use-case", "value"),
+)
+def update_save_button_state(cell_changed, assign_clicks, save_clicks, year, user):
+    if ctx.triggered_id in ("my-grid", "assign-gf"):
+        return "primary", False
+    return "secondary", True
