@@ -11,3 +11,17 @@ services:
     volumes:
       - ./secrets:/app/secrets
     restart: unless-stopped
+
+  budgetbaby-dev:
+    build: .
+    container_name: budgetbaby-dev
+    ports:
+      - "8080:8080"
+    environment:
+      - ENV_PATH=/app/secrets/env-file.docker-dev
+    volumes:
+      - ./secrets:/app/secrets
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    profiles:
+      - dev

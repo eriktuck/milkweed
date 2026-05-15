@@ -52,3 +52,9 @@ env-file
 
 # Temp scripts
 tmp/
+
+# Firebase emulator runtime artifacts
+.firebase/
+firebase-debug.log
+firestore-debug.log
+firestore-emulator-data/
