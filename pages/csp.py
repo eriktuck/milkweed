@@ -26,7 +26,18 @@ CSP_DICT = {
     'guilt-free': 'Guilt Free',
 }
 
+NET_WORTH_CATEGORIES = ["Assets", "Investments", "Savings", "Debt"]
+NET_WORTH_TOTAL = "Total Net Worth"
+
 dash.register_page(__name__, path='/csp')
+
+net_worth_grid = dag.AgGrid(
+    id="net-worth-grid",
+    className="ag-theme-quartz",
+    defaultColDef={"editable": False, "sortable": False},
+    style={"width": "100%", "height": "100%"},
+    dashGridOptions={"domLayout": "autoHeight"},
+)
 
 grid = dag.AgGrid(
     id="csp-grid",
@@ -63,6 +74,9 @@ layout = html.Div([
                 className="d-flex align-items-center",
             ),
         ], className="pt-3 pb-3 align-items-center"),
+        html.H4("Net Worth", className="mb-2"),
+        html.Div(net_worth_grid, id="net-worth-grid-container", className="mb-4"),
+        html.H4("Spending Plan", className="mb-2"),
         html.Div(grid, id="csp-grid-container", style={"height": "calc(100vh - 200px)"}),
     ])
 ])
@@ -140,7 +154,11 @@ def _csp_from_actuals(config, users, transactions_json):
     [Output("csp-grid", "rowData"),
      Output("csp-grid", "columnDefs"),
      Output("csp-grid", "getRowStyle"),
-     Output("csp-grid-container", "style")],
+     Output("csp-grid-container", "style"),
+     Output("net-worth-grid", "rowData"),
+     Output("net-worth-grid", "columnDefs"),
+     Output("net-worth-grid", "getRowStyle"),
+     Output("net-worth-grid-container", "style")],
     Input('config-store', 'data'),
     Input('csp-source', 'value'),
     State('transaction-data-store', 'data'),
@@ -222,4 +240,48 @@ def populate_csp(config, source, transactions_json):
     grid_width = category_width + len(user_columns) * data_col_width
     container_style = {"height": "calc(100vh - 200px)", "width": f"{grid_width}px", "margin": "0 auto"}
 
-    return row_data, columnDefs, getRowStyle, container_style
+    # Build net worth grid outputs
+    dollar_formatter = {"function": "'$' + params.value.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})"}
+    nw_data_cols = [u for u in users] + ["total"]
+
+    nw_rows = []
+    for cat in NET_WORTH_CATEGORIES:
+        row = {"category": cat}
+        row.update({col: 0 for col in nw_data_cols})
+        nw_rows.append(row)
+
+    total_row = {"category": NET_WORTH_TOTAL}
+    total_row.update({col: 0 for col in nw_data_cols})
+    nw_rows.append(total_row)
+
+    nw_columnDefs = [
+        {"field": "category", "headerName": "Category", "editable": False, "width": 200},
+    ] + [
+        {
+            "field": col,
+            "headerName": col_header(col),
+            "type": "number",
+            "editable": False,
+            "width": 210,
+            "minWidth": 150,
+            "resizable": True,
+            "valueFormatter": dollar_formatter,
+        }
+        for col in nw_data_cols
+    ]
+
+    nw_getRowStyle = {
+        "styleConditions": [
+            {
+                "condition": f"params.data.category === '{NET_WORTH_TOTAL}'",
+                "style": {"backgroundColor": "#4a5568", "color": "white", "fontWeight": "bold"},
+            },
+            {
+                "condition": "params.rowIndex % 2 === 1",
+                "style": {"backgroundColor": "#f4f6f8"},
+            },
+        ]}
+
+    nw_container_style = {"width": f"{grid_width}px", "margin": "0 auto"}
+
+    return row_data, columnDefs, getRowStyle, container_style, nw_rows, nw_columnDefs, nw_getRowStyle, nw_container_style
