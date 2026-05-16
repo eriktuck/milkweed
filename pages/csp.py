@@ -38,7 +38,7 @@ grid = dag.AgGrid(
 layout = html.Div([
     dbc.Container([
         dbc.Row(html.H1('Conscious Spending Plan'), className="pt-3 pb-3"),
-        html.Div(grid, style={"height": "calc(100vh - 200px)"}),
+        html.Div(grid, id="csp-grid-container", style={"height": "calc(100vh - 200px)"}),
     ])
 ])
 
@@ -46,7 +46,8 @@ layout = html.Div([
 @callback(
     [Output("csp-grid", "rowData"),
      Output("csp-grid", "columnDefs"),
-     Output("csp-grid", "getRowStyle")],
+     Output("csp-grid", "getRowStyle"),
+     Output("csp-grid-container", "style")],
     Input('config-store', 'data')
 )
 def populate_csp(config):
@@ -112,11 +113,17 @@ def populate_csp(config):
     row_data = csp.to_dict("records")
     user_columns = [col for col in csp.columns if col not in ["category", "csp_label", "id"]]
 
+    def col_header(col):
+        if col == "total":
+            return "Total"
+        return config["users"].get(col, {}).get("name", col).title()
+
     columnDefs = [
-    {"field": "category", "editable": False},
+    {"field": "category", "headerName": "Category", "editable": False, "width": 200},
     ] + [
         {
             "field": col,
+            "headerName": col_header(col),
             "type": "number",
             "editable": {"function": f"!{HEADER_ROWS}.includes(params.data.category)"},
             "width": 210,
@@ -144,4 +151,9 @@ def populate_csp(config):
             },
         ]}
 
-    return row_data, columnDefs, getRowStyle
+    category_width = 200
+    data_col_width = 210
+    grid_width = category_width + len(user_columns) * data_col_width
+    container_style = {"height": "calc(100vh - 200px)", "width": f"{grid_width}px", "margin": "0 auto"}
+
+    return row_data, columnDefs, getRowStyle, container_style
