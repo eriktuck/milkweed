@@ -130,7 +130,7 @@ def populate_csp(config):
             "minWidth": 150,
             "resizable": True,
             "valueFormatter": {
-                "function": f"{HEADER_ROWS}.includes(params.data.category) ? (params.value * 100).toFixed(0) + '%' : '$' + params.value.toFixed(2).toLocaleString()"
+                "function": f"{HEADER_ROWS}.includes(params.data.category) ? (params.value * 100).toFixed(0) + '%' : '$' + params.value.toLocaleString('en-US', {{minimumFractionDigits: 2, maximumFractionDigits: 2}})"
             },
             'valueParser': {'function': 'Number(params.newValue)'}
         }
