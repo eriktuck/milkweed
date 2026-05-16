@@ -165,6 +165,21 @@ def commit_in_batches(items, write_fn, batch_size=400):
         batch.commit()
 
 
+def save_csp_snapshot_to_firestore(collection_str: str, uid: str, key: str, data: dict):
+    """Write a CSP snapshot document under csp_snapshots/{key}.
+
+    key is 'plan' (spending plan monthly averages) or 'net_worth'.
+    """
+    ref = (
+        db.collection(collection_str)
+        .document(uid)
+        .collection("csp_snapshots")
+        .document(key)
+    )
+    clean = {k: float(v) for k, v in data.items() if v is not None}
+    ref.set(clean)
+
+
 def save_budget_to_firestore(collection_str: str, uid: str, year: str | int, budget_data: dict):
     """Write/overwrite all monthly budget documents for one year.
 

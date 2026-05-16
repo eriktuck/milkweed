@@ -19,6 +19,8 @@ class UserConfig(BaseModel):
     name: str
     uid: str | None = None
     budget: dict | None = None
+    csp_plan: dict | None = None
+    net_worth: dict | None = None
 
 
 class HouseholdConfig(UserConfig):
@@ -46,6 +48,11 @@ class SessionData:
             year_dict = budgets.setdefault(year, {})
             year_dict[int(month)] = doc.to_dict()
         return budgets
+
+    @staticmethod
+    def fetch_csp_snapshot(ref, key):
+        doc = ref.collection("csp_snapshots").document(key).get()
+        return doc.to_dict() if doc.exists else {}
     
     def get_user_configs(self) -> dict[str,dict]:
         """Get the user configurations as dictionary"""
@@ -67,6 +74,8 @@ class SessionData:
             hh_ref = db.collection("households").document(household_id)
             hh_config["uid"] = household_id
             hh_config["budget"] = self.fetch_budgets(hh_ref)
+            hh_config["csp_plan"] = self.fetch_csp_snapshot(hh_ref, "plan")
+            hh_config["net_worth"] = self.fetch_csp_snapshot(hh_ref, "net_worth")
 
             self.data["users"][household_id] = hh_config
         
@@ -84,6 +93,8 @@ class SessionData:
             user_ref = db.collection("users").document(member_id)
             user_config["uid"] = member_id
             user_config["budget"] = self.fetch_budgets(user_ref)
+            user_config["csp_plan"] = self.fetch_csp_snapshot(user_ref, "plan")
+            user_config["net_worth"] = self.fetch_csp_snapshot(user_ref, "net_worth")
 
             self.data["users"][member_id] = user_config
 
