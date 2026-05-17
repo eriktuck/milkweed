@@ -55,6 +55,7 @@ grid = dag.AgGrid(
         'undoRedoCellEditing': True,
         'undoRedoCellEditingLimit': 12,
         'suppressMaintainUnsortedOrder': True,
+        'tooltipShowDelay': 300,
         },
 )
 
@@ -275,14 +276,22 @@ def populate_csp(config, source, is_editing, transactions_json):
         jc_fixed_row[u] = jc_values.get(u, 0)
     for u in household_users:
         jc_fixed_row[u] = 0
-    jc_fixed_row["total"] = hh_jc
+    jc_fixed_row["total"] = 0
+    jc_fixed_row["total_tooltip"] = (
+        "joint contribution does not factor into Total Fixed Costs. "
+        "It is a transfer from members to cover household shared expenses."
+    )
 
     jc_income_row = {"category": "joint_contribution", "id": JC_INCOME_ID, "csp_label": "income"}
     for u in individual_users:
         jc_income_row[u] = 0
     for u in household_users:
         jc_income_row[u] = hh_jc
-    jc_income_row["total"] = hh_jc
+    jc_income_row["total"] = 0
+    jc_income_row["total_tooltip"] = (
+        "joint contribution does not factor into Total Income. "
+        "It is a transfer from members to cover household shared expenses."
+    )
 
     fc_idx = next((i for i, r in enumerate(row_data) if r.get("category") == "Fixed Costs"), None)
     if fc_idx is not None:
@@ -323,7 +332,8 @@ def populate_csp(config, source, is_editing, transactions_json):
             "valueFormatter": {
                 "function": f"{HEADER_ROWS}.includes(params.data.category) ? (params.value * 100).toFixed(0) + '%' : '$' + params.value.toLocaleString('en-US', {{minimumFractionDigits: 2, maximumFractionDigits: 2}})"
             },
-            'valueParser': {'function': 'Number(params.newValue)'}
+            'valueParser': {'function': 'Number(params.newValue)'},
+            **({"tooltipField": "total_tooltip"} if col == "total" else {}),
         }
         for col in user_columns
     ] + [
@@ -457,7 +467,8 @@ def update_csp_total(_, row_data, config_json):
     df = pd.DataFrame(row_data)
     non_user_cols = {"category", "csp_label", "id", "total"}
     user_cols = [c for c in df.columns if c not in non_user_cols]
-    data_rows = ~df["category"].isin(HEADER_ROWS)
+    jc_mask = df["id"].isin([JC_FIXED_ID, JC_INCOME_ID])
+    data_rows = ~df["category"].isin(HEADER_ROWS) & ~jc_mask
     df.loc[data_rows, "total"] = (
         df.loc[data_rows, user_cols]
         .apply(pd.to_numeric, errors="coerce")
@@ -478,7 +489,9 @@ def update_csp_total(_, row_data, config_json):
         for hh in household_users:
             if hh in df.columns:
                 df.loc[jc_income_mask, hh] = hh_jc
-        df.loc[jc_income_mask, "total"] = hh_jc
+
+    # jc rows never contribute to Total — it's a transfer, not income/expense
+    df.loc[jc_mask, "total"] = 0
 
     return df.to_dict("records")
 
