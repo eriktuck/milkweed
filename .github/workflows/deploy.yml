@@ -1,0 +1,26 @@
+name: Deploy to Cloud Run
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/93265593847/locations/global/workloadIdentityPools/github-pool/providers/github-provider
+          service_account: github-actions@budgetbaby-457121.iam.gserviceaccount.com
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Deploy
+        run: gcloud builds submit --config cloudbuild.yaml --project budgetbaby-457121
