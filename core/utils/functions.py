@@ -785,6 +785,132 @@ def order_budget(budget, config, user):
 
     return budget
 
+def plot_spending_trends(transactions, owner_uid, start_date, end_date,
+                          smoothing, as_percent, drilldown_label=None):
+    """Plot spending over time, optionally drilled into a CSP label's subcategories."""
+    utc = pytz.UTC
+
+    def to_utc(d):
+        if isinstance(d, str):
+            d = dt.fromisoformat(d)
+        return d.replace(tzinfo=utc) if d.tzinfo is None else d.astimezone(utc)
+
+    start_date = to_utc(start_date)
+    end_date = to_utc(end_date)
+
+    df = transactions.loc[
+        (transactions['account_owner'] == owner_uid) &
+        (transactions['date'] >= start_date) &
+        (transactions['date'] <= end_date)
+    ].copy()
+
+    if df.empty:
+        return go.Figure()
+
+    df['date'] = pd.to_datetime(df['date'], utc=True)
+
+    # Compute income by period before any drilldown filter (used for normalization and reference line)
+    income_by_period = (
+        df[df['csp_label'] == 'income']
+        .groupby(pd.Grouper(key='date', freq=smoothing))['amount']
+        .sum()
+        .abs()
+    )
+
+    group_col = 'csp' if drilldown_label else 'csp_label'
+    if drilldown_label:
+        df = df[df['csp_label'] == drilldown_label]
+
+    result = (
+        df.groupby([pd.Grouper(key='date', freq=smoothing), group_col])['amount']
+        .sum()
+        .reset_index()
+    )
+    result.columns = ['date', group_col, 'amount']
+
+    pivot = result.pivot_table(
+        index='date', columns=group_col, values='amount', aggfunc='sum'
+    ).fillna(0).abs()
+
+    if as_percent:
+        ref_income = income_by_period.reindex(pivot.index).replace(0, np.nan)
+        for col in pivot.columns:
+            pivot[col] = pivot[col] / ref_income
+        pivot = pivot.fillna(0)
+
+    csp_colors = {
+        'fixed': '#F3969A',
+        'investments': '#78C2AD',
+        'savings': '#FFCE67',
+        'guilt-free': '#6f42c1',
+        'income': '#888',
+    }
+    fallback_colors = ['#78c2ad', '#f3969a', '#ffce67', '#6f42c1', '#5bc0be', '#d972ff']
+
+    label_order = ['fixed', 'investments', 'savings', 'guilt-free']
+    if drilldown_label:
+        ordered_cols = list(pivot.columns)
+    else:
+        ordered_cols = [l for l in label_order if l in pivot.columns]
+        ordered_cols += [c for c in pivot.columns if c not in label_order and c != 'income']
+
+    fig = go.Figure()
+    hover_fmt = '%{y:.1%}' if as_percent else '$%{y:,.0f}'
+
+    for i, col in enumerate(ordered_cols):
+        color = csp_colors.get(col, fallback_colors[i % len(fallback_colors)])
+        label = col.replace('-', ' ').replace('_', ' ').title()
+        fig.add_trace(go.Scatter(
+            x=pivot.index,
+            y=pivot[col],
+            name=label,
+            mode='lines',
+            stackgroup='spending',
+            line=dict(color=color, width=0.5),
+            fillcolor=color,
+            customdata=[col] * len(pivot),
+            hovertemplate=f'{label}: {hover_fmt}<extra></extra>',
+            hoverlabel=dict(bgcolor=color, bordercolor=color, font=dict(color='white')),
+        ))
+
+    # Income reference line (top-level view only)
+    if not drilldown_label and not income_by_period.empty:
+        income_aligned = income_by_period.reindex(pivot.index)
+        income_y = [1.0] * len(pivot) if as_percent else income_aligned.values
+        fig.add_trace(go.Scatter(
+            x=pivot.index,
+            y=income_y,
+            name='Income',
+            mode='lines',
+            line=dict(color='#888', dash='dot', width=2),
+            customdata=['income'] * len(pivot),
+            hovertemplate=('Income: %{y:.1%}<extra></extra>' if as_percent
+                          else 'Income: $%{y:,.0f}<extra></extra>'),
+            hoverlabel=dict(bgcolor='#888', bordercolor='#888', font=dict(color='white')),
+        ))
+
+    tick_formats = {'YE': '%Y', 'ME': '%b %Y', 'W': '%b %d', 'D': '%b %d'}
+
+    fig.update_layout(
+        xaxis_title=None,
+        yaxis_title='% of Income' if as_percent else 'Amount (USD)',
+        yaxis_tickformat='.0%' if as_percent else '$,.0f',
+        template='plotly_white',
+        showlegend=True,
+        hovermode='x unified',
+        legend=dict(font=dict(color='#888')),
+        font=dict(color='#888'),
+        margin=dict(t=10, b=40, l=20, r=20),
+        height=450,
+    )
+    fig.update_xaxes(tickformat=tick_formats.get(smoothing, '%Y-%m'))
+
+    if as_percent:
+        fig.update_layout(yaxis_range=[0, 1.5])
+
+    return fig
+
+
 def plot_csp_by_label(processed_transactions, as_percent):
     df = processed_transactions.groupby([processed_transactions['date'].dt.year, 'csp_label'])['amount'].sum().reset_index()
     df.columns = ['date', 'csp_label', 'value']
