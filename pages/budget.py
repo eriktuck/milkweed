@@ -72,6 +72,29 @@ update_from_csp_button = dbc.Button(
     color="info",
 )
 
+csp_apply_modal = dbc.Modal(
+    [
+        dbc.ModalHeader(dbc.ModalTitle("Update Budget from CSP")),
+        dbc.ModalBody([
+            dbc.Label("Apply CSP starting from month:"),
+            dbc.Input(
+                id="csp-apply-start-month",
+                type="month",
+                className="mt-2",
+            ),
+            dbc.FormText(
+                "CSP amounts will be distributed across this month and the following 11 months.",
+                className="mt-1",
+            ),
+        ]),
+        dbc.ModalFooter(
+            dbc.Button("Apply", id="csp-apply-confirm", color="info"),
+        ),
+    ],
+    id="csp-apply-modal",
+    is_open=False,
+)
+
 new_budget_modal = dbc.Modal(
     [
         dbc.ModalHeader(dbc.ModalTitle("Add New Budget")),
@@ -111,6 +134,7 @@ new_budget_modal = dbc.Modal(
 ### LAYOUT ###
 layout = html.Div([
     new_budget_modal,
+    csp_apply_modal,
     dbc.Container([
         dbc.Row(
             [
@@ -610,16 +634,39 @@ def update_save_button_state(cell_changed, assign_clicks, save_clicks, year, use
 
 
 @callback(
+    Output("csp-apply-modal", "is_open"),
+    Input("update-from-csp", "n_clicks"),
+    prevent_initial_call=True,
+)
+def open_csp_apply_modal(n_clicks):
+    return True
+
+
+@callback(
+    Output("csp-apply-start-month", "value"),
+    Input("csp-apply-modal", "is_open"),
+    prevent_initial_call=True,
+)
+def initialize_csp_apply_month(is_open):
+    if not is_open:
+        raise PreventUpdate
+    next_month = dt.today().replace(day=1) + relativedelta(months=1)
+    return next_month.strftime('%Y-%m')
+
+
+@callback(
     Output("config-store", "data", allow_duplicate=True),
     Output("budget-year", "options", allow_duplicate=True),
     Output("budget-year", "value", allow_duplicate=True),
-    Input("update-from-csp", "n_clicks"),
+    Output("csp-apply-modal", "is_open", allow_duplicate=True),
+    Input("csp-apply-confirm", "n_clicks"),
+    State("csp-apply-start-month", "value"),
     State("config-store", "data"),
     State("use-case", "value"),
     State("budget-year", "options"),
     prevent_initial_call=True,
 )
-def apply_csp_to_budget(n_clicks, config_json, user, current_options):
+def apply_csp_to_budget(n_clicks, start_month, config_json, user, current_options):
     if n_clicks is None:
         raise PreventUpdate
 
@@ -637,8 +684,11 @@ def apply_csp_to_budget(n_clicks, config_json, user, current_options):
     cat_order = config["users"][user]['cat_order']
     categories = [c for c in cat_order if c not in CSP_GROUPS and c not in NON_BUDGETABLE]
 
-    today = dt.today()
-    window_start = today.replace(day=1) + relativedelta(months=1)
+    if start_month:
+        year, month = map(int, start_month.split('-'))
+        window_start = dt(year, month, 1)
+    else:
+        window_start = dt.today().replace(day=1) + relativedelta(months=1)
     generated = functions.generate_budget_from_csp(active_plan, budget, categories, window_start)
 
     # Merge into config — only forward months, historical months untouched
@@ -660,12 +710,12 @@ def apply_csp_to_budget(n_clicks, config_json, user, current_options):
         if year_str not in existing_values:
             new_options.append({'label': year_str, 'value': year_str})
 
-    # Navigate to current year so the user sees the updated months
-    current_year_str = str(today.year)
+    # Navigate to the start month's year so the user sees the updated months
+    start_year_str = str(window_start.year)
     new_value = (
-        current_year_str
-        if current_year_str in {o['value'] for o in new_options}
+        start_year_str
+        if start_year_str in {o['value'] for o in new_options}
         else (new_options[-1]['value'] if new_options else None)
     )
 
-    return json.dumps(config), new_options, new_value
+    return json.dumps(config), new_options, new_value, False

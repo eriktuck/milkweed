@@ -7,8 +7,8 @@ navbar = dbc.NavbarSimple(
     id="navbar",
     children=[
         dbc.NavItem(dbc.NavLink("Actual", href="/dash/")),
-        dbc.NavItem(dbc.NavLink("Budget", href="/dash/budget")),
         dbc.NavItem(dbc.NavLink("CSP", href="/dash/csp")),
+        dbc.NavItem(dbc.NavLink("Budget", href="/dash/budget")),
         dbc.DropdownMenu(
             children=[
                 dbc.DropdownMenuItem("Trends", href="/dash/trends"),

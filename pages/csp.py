@@ -80,6 +80,18 @@ layout = html.Div([
                 className="d-flex align-items-center",
             ),
             dbc.Col(
+                dbc.Select(
+                    id="csp-snapshot-date",
+                    options=[],
+                    value=None,
+                    style={"width": "160px"},
+                ),
+                id="csp-snapshot-date-col",
+                width="auto",
+                className="d-flex align-items-center",
+                style={"display": "none"},
+            ),
+            dbc.Col(
                 html.Div([
                     dbc.Button("Edit", id="csp-edit-btn", size="md", color="secondary", class_name="me-2"),
                     dbc.Button("Cancel", id="csp-cancel-btn", size="md", color="light", style={"display": "none"}),
@@ -93,15 +105,22 @@ layout = html.Div([
         html.H4("Spending Plan", className="mb-2"),
         html.Div(grid, id="csp-grid-container", style={"height": "calc(100vh - 200px)"}),
         html.Div(
-            dbc.Button(
-                "Save CSP",
-                id="save-csp",
-                size="md",
-                color="primary",
-                class_name="me-md-2",
-            ),
+            [
+                dbc.Input(
+                    id="csp-save-date",
+                    type="date",
+                    style={"width": "160px"},
+                    className="me-2",
+                ),
+                dbc.Button(
+                    "Save CSP",
+                    id="save-csp",
+                    size="md",
+                    color="primary",
+                ),
+            ],
             id="save-csp-container",
-            className="d-grid pt-3 pb-3 d-md-flex justify-content-md-end",
+            className="pt-3 pb-3 d-flex justify-content-end align-items-center",
             style={"display": "none"},
         ),
     ])
@@ -206,15 +225,18 @@ def _csp_from_actuals(config, users, transactions_json):
     return pd.concat([frames[u] for u in users], axis=1), jc_values
 
 
-def _csp_from_saved(config, users):
+def _csp_from_saved(config, users, snapshot_date=None):
     def monthly_avg_fn(user):
         csp_labels_config = config["users"][user]['csp_labels']
         base = pd.DataFrame.from_dict(csp_labels_config, orient='index', columns=['csp_label'])
         csp_plans = config["users"][user].get("csp_plans") or {}
-        active_plan = functions.get_active_csp_plan(csp_plans)
-        # backward compat: fall back to legacy flat csp_plan for in-flight sessions
-        if not active_plan:
-            active_plan = config["users"][user].get("csp_plan") or {}
+        if snapshot_date and snapshot_date in csp_plans:
+            active_plan = csp_plans[snapshot_date]
+        else:
+            active_plan = functions.get_active_csp_plan(csp_plans)
+            # backward compat: fall back to legacy flat csp_plan for in-flight sessions
+            if not active_plan:
+                active_plan = config["users"][user].get("csp_plan") or {}
         saved = pd.Series(active_plan, dtype=float)
         saved.name = user
         s = base.join(saved, how='left')[user].fillna(0)
@@ -237,9 +259,10 @@ def _csp_from_saved(config, users):
     Input('config-store', 'data'),
     Input('csp-source', 'value'),
     Input('csp-is-editing', 'data'),
+    Input('csp-snapshot-date', 'value'),
     State('transaction-data-store', 'data'),
 )
-def populate_csp(config, source, is_editing, transactions_json):
+def populate_csp(config, source, is_editing, snapshot_date, transactions_json):
     config = json.loads(config)
     users = list(config["users"].keys())
     individual_users = [u for u in users if "members" not in config["users"][u]]
@@ -250,7 +273,7 @@ def populate_csp(config, source, is_editing, transactions_json):
             raise PreventUpdate
         csp, jc_values = _csp_from_actuals(config, users, transactions_json)
     elif source == "saved":
-        csp, jc_values = _csp_from_saved(config, users)
+        csp, jc_values = _csp_from_saved(config, users, snapshot_date=snapshot_date)
     else:
         csp, jc_values = _csp_from_budget(config, users)
 
@@ -455,6 +478,37 @@ def update_edit_controls(is_editing):
 
 
 @callback(
+    Output("csp-snapshot-date", "options"),
+    Output("csp-snapshot-date", "value"),
+    Output("csp-snapshot-date-col", "style"),
+    Input("config-store", "data"),
+    Input("csp-source", "value"),
+)
+def update_snapshot_date_selector(config_json, source):
+    if source != "saved":
+        return [], None, {"display": "none"}
+    config = json.loads(config_json)
+    all_dates = set()
+    for user_data in config["users"].values():
+        all_dates.update((user_data.get("csp_plans") or {}).keys())
+    sorted_dates = sorted(all_dates, reverse=True)
+    options = [{"label": d, "value": d} for d in sorted_dates]
+    value = sorted_dates[0] if sorted_dates else None
+    return options, value, {}
+
+
+@callback(
+    Output("csp-save-date", "value"),
+    Input("csp-is-editing", "data"),
+    prevent_initial_call=True,
+)
+def initialize_save_date(is_editing):
+    if not is_editing:
+        raise PreventUpdate
+    return dt.today().strftime('%Y-%m-%d')
+
+
+@callback(
     Output("csp-grid", "rowData", allow_duplicate=True),
     Input("csp-grid", "cellValueChanged"),
     State("csp-grid", "rowData"),
@@ -535,9 +589,10 @@ def update_net_worth_total(_, row_data):
     State("csp-grid", "rowData"),
     State("net-worth-grid", "rowData"),
     State("config-store", "data"),
+    State("csp-save-date", "value"),
     prevent_initial_call=True,
 )
-def save_csp(n, csp_row_data, nw_row_data, config_json):
+def save_csp(n, csp_row_data, nw_row_data, config_json, save_date):
     if n is None:
         raise PreventUpdate
 
@@ -550,7 +605,7 @@ def save_csp(n, csp_row_data, nw_row_data, config_json):
     # Exclude group headers and the computed jc_income row (it's derived, not stored)
     save_mask = ~csp_df["category"].isin(HEADER_ROWS) & (csp_df["id"] != JC_INCOME_ID)
 
-    today_iso = dt.today().strftime('%Y-%m-%d')
+    today_iso = save_date or dt.today().strftime('%Y-%m-%d')
 
     for user in users:
         collection_str = "households" if "members" in config["users"][user] else "users"
