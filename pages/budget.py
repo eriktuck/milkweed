@@ -179,12 +179,12 @@ def populate_budget(year, config, user):
     config = json.loads(config)
     budget = functions.read_budget(config, user)
 
-    year_cols = [(year, m) for m in range(1, 13) if (year, m) in budget.columns]
-    if not year_cols:
+    all_year_cols = [(year, m) for m in range(1, 13)]
+    if not any(col in budget.columns for col in all_year_cols):
         no_data_msg = dbc.Alert(f"No budget found for {year}.", color="info", className="mb-3")
         return [], [], {}, no_data_msg
 
-    budget = budget.loc[:, (year, 1):(year, 12)]
+    budget = budget.reindex(columns=all_year_cols)
 
     budget.columns = [
         f"{calendar.month_abbr[int(month)]}" 
@@ -540,12 +540,14 @@ def preview_new_budget(n_clicks, new_year, methods, pcts, config_json, user, tra
     ly_cols = [(ly, m) for m in range(1, 13) if (ly, m) in budget.columns]
     ly_budget = budget[ly_cols] if ly_cols else pd.DataFrame(index=budget.index)
 
-    # LY actuals — only parse transactions if any category uses copy_actuals
+    # Rolling 12-month actuals — only parse transactions if any category uses copy_actuals
     ly_actuals = {}
     if 'copy_actuals' in methods and transactions_data:
         df = pd.read_json(StringIO(transactions_data), orient='split')
         df['date'] = pd.to_datetime(df['date'])
-        filt = (df['date'].dt.year == ly) & (df['account_owner'] == user)
+        today = dt.today()
+        rolling_start = today.replace(day=1) - relativedelta(months=12)
+        filt = (df['date'] >= rolling_start) & (df['date'] <= today) & (df['account_owner'] == user)
         ly_actuals = df.loc[filt].groupby('csp')['amount'].sum().abs().to_dict()
 
     new_budget_months = {m: {} for m in range(1, 13)}
