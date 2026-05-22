@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import pytz
+from dateutil.relativedelta import relativedelta
 from flask import session
 from typing import Any, Optional
 from pathlib import Path
@@ -260,12 +261,72 @@ def read_budget(config, user): # TODO read from dedicated session store in Dash?
     budget_dict = config['users'][user]['budget']
 
     budget = pd.DataFrame({
-        (int(year), int(month)): values 
-        for year, months in budget_dict.items() 
+        (int(year), int(month)): values
+        for year, months in budget_dict.items()
         for month, values in months.items()
     })
 
     return budget
+
+
+def get_monthly_loading(budget: pd.DataFrame, category: str, period_months: list) -> list:
+    """Normalize a category's budget values over period_months into weights summing to 1."""
+    vals = []
+    for year, month in period_months:
+        col = (year, month)
+        if col in budget.columns and category in budget.index:
+            val = budget.loc[category, col]
+            vals.append(0.0 if pd.isna(val) else float(val))
+        else:
+            vals.append(0.0)
+    total = sum(vals)
+    return [v / total for v in vals] if total > 0 else [1 / 12] * 12
+
+
+def get_active_csp_plan(csp_plans: dict, as_of: str | None = None) -> dict:
+    """Return the most recent plan with effective date <= as_of (ISO YYYY-MM-DD, defaults to today)."""
+    if not csp_plans:
+        return {}
+    if as_of is None:
+        as_of = dt.today().strftime('%Y-%m-%d')
+    eligible = {k: v for k, v in csp_plans.items() if k <= as_of}
+    return eligible[max(eligible)] if eligible else {}
+
+
+def generate_budget_from_csp(
+    csp_plan: dict,
+    budget: pd.DataFrame,
+    categories: list,
+    window_start: dt,
+) -> dict:
+    """Generate a 12-month rolling budget from CSP monthly amounts.
+
+    Uses the trailing 12-month budget shape (loading) to distribute CSP annual
+    amounts across the forward 12-month window starting at window_start.
+
+    Returns {str(year): {str(month): {category: amount}}}.
+    """
+    trailing_start = window_start.replace(day=1) - relativedelta(months=12)
+    trailing_months = []
+    d = trailing_start
+    for _ in range(12):
+        trailing_months.append((d.year, d.month))
+        d += relativedelta(months=1)
+
+    forward_months = []
+    d = window_start.replace(day=1)
+    for _ in range(12):
+        forward_months.append((d.year, d.month))
+        d += relativedelta(months=1)
+
+    result = {}
+    for category in categories:
+        loading = get_monthly_loading(budget, category, trailing_months)
+        annual = float(csp_plan.get(category, 0.0)) * 12
+        for i, (year, month) in enumerate(forward_months):
+            result.setdefault(str(year), {}).setdefault(str(month), {})[category] = round(annual * loading[i], 2)
+
+    return result
 
 
 def calc_proportions(df):

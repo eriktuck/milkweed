@@ -1,11 +1,14 @@
 from typing import Dict, List, Optional
 from pydantic import BaseModel, Field
 import json
+import re
 from core.services.firebase import (
     db,
     find_household_for_user,
     get_user_config
 )
+
+_DATE_PAT = re.compile(r'^\d{4}-\d{2}-\d{2}$')
 
 class UserConfig(BaseModel):
     accounts: List[str]
@@ -19,7 +22,8 @@ class UserConfig(BaseModel):
     name: str
     uid: str | None = None
     budget: dict | None = None
-    csp_plan: dict | None = None
+    csp_plan: dict | None = None  # legacy — superseded by csp_plans
+    csp_plans: dict | None = None
     net_worth: dict | None = None
 
 
@@ -53,6 +57,21 @@ class SessionData:
     def fetch_csp_snapshot(ref, key):
         doc = ref.collection("csp_snapshots").document(key).get()
         return doc.to_dict() if doc.exists else {}
+
+    @staticmethod
+    def fetch_csp_plans(ref):
+        """Stream csp_snapshots; docs with YYYY-MM-DD IDs become csp_plans entries.
+        Falls back to the legacy 'plan' doc if no dated entries exist."""
+        plans = {}
+        for doc in ref.collection("csp_snapshots").stream():
+            if _DATE_PAT.match(doc.id):
+                plans[doc.id] = doc.to_dict()
+        if not plans:
+            # backward compat: old flat 'plan' doc → treat as epoch entry
+            legacy_doc = ref.collection("csp_snapshots").document("plan").get()
+            if legacy_doc.exists:
+                plans["1970-01-01"] = legacy_doc.to_dict()
+        return plans
     
     def get_user_configs(self) -> dict[str,dict]:
         """Get the user configurations as dictionary"""
@@ -74,7 +93,7 @@ class SessionData:
             hh_ref = db.collection("households").document(household_id)
             hh_config["uid"] = household_id
             hh_config["budget"] = self.fetch_budgets(hh_ref)
-            hh_config["csp_plan"] = self.fetch_csp_snapshot(hh_ref, "plan")
+            hh_config["csp_plans"] = self.fetch_csp_plans(hh_ref)
             hh_config["net_worth"] = self.fetch_csp_snapshot(hh_ref, "net_worth")
 
             self.data["users"][household_id] = hh_config
@@ -93,7 +112,7 @@ class SessionData:
             user_ref = db.collection("users").document(member_id)
             user_config["uid"] = member_id
             user_config["budget"] = self.fetch_budgets(user_ref)
-            user_config["csp_plan"] = self.fetch_csp_snapshot(user_ref, "plan")
+            user_config["csp_plans"] = self.fetch_csp_plans(user_ref)
             user_config["net_worth"] = self.fetch_csp_snapshot(user_ref, "net_worth")
 
             self.data["users"][member_id] = user_config

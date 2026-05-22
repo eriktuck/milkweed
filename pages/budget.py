@@ -7,6 +7,8 @@ import json
 import pandas as pd
 import numpy as np
 import calendar
+from datetime import datetime as dt
+from dateutil.relativedelta import relativedelta
 from io import StringIO
 
 from core.utils import functions
@@ -63,6 +65,13 @@ add_new_button = dbc.Button(
     color="success",
 )
 
+update_from_csp_button = dbc.Button(
+    "Update from CSP",
+    id="update-from-csp",
+    size="md",
+    color="info",
+)
+
 new_budget_modal = dbc.Modal(
     [
         dbc.ModalHeader(dbc.ModalTitle("Add New Budget")),
@@ -105,9 +114,13 @@ layout = html.Div([
     dbc.Container([
         dbc.Row(
             [
-                dbc.Col(html.H1('Budget'), width=8),
+                dbc.Col(html.H1('Budget'), width=6),
                 dbc.Col(year_dropdown, width=2),
-                dbc.Col(add_new_button, width=2, className="d-flex align-items-center"),
+                dbc.Col(
+                    html.Div([add_new_button, update_from_csp_button], className="d-flex gap-2"),
+                    width=4,
+                    className="d-flex align-items-center",
+                ),
             ], className="pt-3 pb-3"),
         html.Div(id="budget-no-data-message"),
         html.Div(remaining_to_budget, className="d-grid pb-3"),
@@ -560,11 +573,8 @@ def preview_new_budget(n_clicks, new_year, methods, pcts, config_json, user, tra
                 new_budget_months[month][category] = round(val * pct, 2)
 
         elif method == 'copy_actuals':
-            total_budget = sum(monthly_budgets)
-            if total_budget > 0:
-                loading = [b / total_budget for b in monthly_budgets]
-            else:
-                loading = [1 / 12] * 12
+            ly_period = [(ly, m) for m in range(1, 13)]
+            loading = functions.get_monthly_loading(ly_budget, category, ly_period)
             ly_total = float(ly_actuals.get(category, 0.0))
             for i, month in enumerate(range(1, 13)):
                 new_budget_months[month][category] = round(ly_total * loading[i] * pct, 2)
@@ -595,3 +605,65 @@ def update_save_button_state(cell_changed, assign_clicks, save_clicks, year, use
     if ctx.triggered_id in ("my-grid", "assign-gf"):
         return "primary", False
     return "light", True
+
+
+@callback(
+    Output("config-store", "data", allow_duplicate=True),
+    Output("budget-year", "options", allow_duplicate=True),
+    Output("budget-year", "value", allow_duplicate=True),
+    Input("update-from-csp", "n_clicks"),
+    State("config-store", "data"),
+    State("use-case", "value"),
+    State("budget-year", "options"),
+    prevent_initial_call=True,
+)
+def apply_csp_to_budget(n_clicks, config_json, user, current_options):
+    if n_clicks is None:
+        raise PreventUpdate
+
+    config = json.loads(config_json)
+
+    csp_plans = config["users"][user].get("csp_plans") or {}
+    active_plan = functions.get_active_csp_plan(csp_plans)
+    # backward compat: fall back to legacy flat csp_plan for in-flight sessions
+    if not active_plan:
+        active_plan = config["users"][user].get("csp_plan") or {}
+    if not active_plan:
+        raise PreventUpdate
+
+    budget = functions.read_budget(config, user)
+    cat_order = config["users"][user]['cat_order']
+    categories = [c for c in cat_order if c not in CSP_GROUPS and c not in NON_BUDGETABLE]
+
+    today = dt.today()
+    window_start = today.replace(day=1) + relativedelta(months=1)
+    generated = functions.generate_budget_from_csp(active_plan, budget, categories, window_start)
+
+    # Merge into config — only forward months, historical months untouched
+    for year_str, months in generated.items():
+        year_budget = config["users"][user]['budget'].setdefault(year_str, {})
+        for month_str, cats in months.items():
+            year_budget.setdefault(month_str, {}).update(cats)
+
+    # Auto-save to Firestore for all affected years
+    collection_str = "households" if "members" in config["users"][user] else "users"
+    uid = config["users"][user]["uid"]
+    for year_str, months_data in generated.items():
+        save_budget_to_firestore(collection_str, uid, year_str, months_data)
+
+    # Update year dropdown — add any new years produced by the rolling window
+    existing_values = {opt['value'] for opt in current_options}
+    new_options = current_options[:]
+    for year_str in sorted(generated):
+        if year_str not in existing_values:
+            new_options.append({'label': year_str, 'value': year_str})
+
+    # Navigate to current year so the user sees the updated months
+    current_year_str = str(today.year)
+    new_value = (
+        current_year_str
+        if current_year_str in {o['value'] for o in new_options}
+        else (new_options[-1]['value'] if new_options else None)
+    )
+
+    return json.dumps(config), new_options, new_value

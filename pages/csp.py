@@ -210,7 +210,12 @@ def _csp_from_saved(config, users):
     def monthly_avg_fn(user):
         csp_labels_config = config["users"][user]['csp_labels']
         base = pd.DataFrame.from_dict(csp_labels_config, orient='index', columns=['csp_label'])
-        saved = pd.Series(config["users"][user].get("csp_plan") or {}, dtype=float)
+        csp_plans = config["users"][user].get("csp_plans") or {}
+        active_plan = functions.get_active_csp_plan(csp_plans)
+        # backward compat: fall back to legacy flat csp_plan for in-flight sessions
+        if not active_plan:
+            active_plan = config["users"][user].get("csp_plan") or {}
+        saved = pd.Series(active_plan, dtype=float)
         saved.name = user
         s = base.join(saved, how='left')[user].fillna(0)
         s.name = user
@@ -545,6 +550,8 @@ def save_csp(n, csp_row_data, nw_row_data, config_json):
     # Exclude group headers and the computed jc_income row (it's derived, not stored)
     save_mask = ~csp_df["category"].isin(HEADER_ROWS) & (csp_df["id"] != JC_INCOME_ID)
 
+    today_iso = dt.today().strftime('%Y-%m-%d')
+
     for user in users:
         collection_str = "households" if "members" in config["users"][user] else "users"
         uid = config["users"][user]["uid"]
@@ -556,8 +563,10 @@ def save_csp(n, csp_row_data, nw_row_data, config_json):
             .fillna(0)
             .to_dict()
         )
-        save_csp_snapshot_to_firestore(collection_str, uid, "plan", csp_plan)
-        config["users"][user]["csp_plan"] = csp_plan
+        save_csp_snapshot_to_firestore(collection_str, uid, today_iso, csp_plan)
+        csp_plans = config["users"][user].get("csp_plans") or {}
+        csp_plans[today_iso] = csp_plan
+        config["users"][user]["csp_plans"] = csp_plans
 
         net_worth = (
             nw_df[nw_df["category"] != NET_WORTH_TOTAL]
