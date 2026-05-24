@@ -58,6 +58,27 @@ def seed(start_date_str: str = "2025-01-01"):
             if budget_docs:
                 print(f"    {len(budget_docs)} budget docs")
 
+            # CSP snapshots sub-collection
+            csp_docs = list(src_ref.collection("csp_snapshots").stream())
+            for cdoc in csp_docs:
+                dst_ref.collection("csp_snapshots").document(cdoc.id).set(cdoc.to_dict())
+            if csp_docs:
+                print(f"    {len(csp_docs)} csp_snapshot docs")
+
+            # Investment holdings snapshot sub-collection
+            holding_docs = list(src_ref.collection("investments").stream())
+            for hdoc in holding_docs:
+                dst_ref.collection("investments").document(hdoc.id).set(hdoc.to_dict())
+            if holding_docs:
+                print(f"    {len(holding_docs)} investment holding docs")
+
+            # Investment transactions sub-collection
+            inv_txn_docs = list(src_ref.collection("investment_transactions").stream())
+            for idoc in inv_txn_docs:
+                dst_ref.collection("investment_transactions").document(idoc.id).set(idoc.to_dict())
+            if inv_txn_docs:
+                print(f"    {len(inv_txn_docs)} investment transaction docs")
+
             # Transactions sub-collection (date-filtered)
             txns = list(
                 src_ref.collection("transactions")
