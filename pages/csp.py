@@ -27,22 +27,106 @@ CSP_DICT = {
     'guilt-free': 'Guilt Free',
 }
 
-NET_WORTH_CATEGORIES = ["Assets", "Investments", "Savings", "Debt"]
-NET_WORTH_TOTAL = "Total Net Worth"
-
 # Special row IDs for the two joint_contribution rows
 JC_FIXED_ID = "jc_fixed"
 JC_INCOME_ID = "jc_income"
+MISC_ROW_ID = "misc_fixed"
 
 dash.register_page(__name__, path='/csp')
 
-net_worth_grid = dag.AgGrid(
-    id="net-worth-grid",
-    className="ag-theme-quartz",
-    defaultColDef={"editable": False, "sortable": False},
-    style={"width": "100%", "height": "100%"},
-    dashGridOptions={"domLayout": "autoHeight"},
-)
+_NON_USER_COLS = {"category", "csp_label", "id", "total", "total_tooltip"}
+
+
+def _build_misc_row(df):
+    """Return a dict for the Miscellaneous (15%) row based on current non-misc fixed rows."""
+    user_cols = [c for c in df.columns if c not in _NON_USER_COLS]
+    jc_mask = df["id"].isin([JC_FIXED_ID, JC_INCOME_ID])
+    fixed_base = (
+        ~df["category"].isin(HEADER_ROWS)
+        & ~jc_mask
+        & (df["id"] != MISC_ROW_ID)
+        & (df["csp_label"] == "fixed")
+    )
+    row = {"category": "Miscellaneous (15%)", "id": MISC_ROW_ID, "csp_label": "fixed"}
+    for col in user_cols:
+        row[col] = pd.to_numeric(df.loc[fixed_base, col], errors="coerce").fillna(0).sum() * 0.15
+    row["total"] = sum(row[col] for col in user_cols)
+    return row
+
+
+def _recalculate_headers(df):
+    """Recalculate all group-header rows from actual data values.
+
+    Income header → dollar sum of its section rows.
+    All other headers → section sum / income (proportion).
+    JC rows land in the right csp_label bucket naturally (income for households,
+    fixed for individuals) with zero values in the total column to avoid double-counting.
+
+    A final "Total" row is appended showing the sum of the four expense-header
+    proportions (total expenses / income), so a value ≠ 100% reveals a plan that
+    doesn't allocate income exactly.
+    """
+    df = df[df["category"] != "Total"].reset_index(drop=True)
+    user_cols = [c for c in df.columns if c not in _NON_USER_COLS]
+    data_rows = ~df["category"].isin(HEADER_ROWS)
+    for col in user_cols + ["total"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+        group_sums = (
+            df[data_rows & df["csp_label"].notna()]
+            .groupby("csp_label")[col]
+            .sum()
+        )
+        income_val = float(group_sums.get("income", 0))
+        for label, header in CSP_DICT.items():
+            val = income_val if label == "income" else (
+                float(group_sums.get(label, 0)) / income_val if income_val != 0 else 0
+            )
+            df.loc[df["category"] == header, col] = val
+
+    expense_headers = [h for label, h in CSP_DICT.items() if label != "income"]
+    total_row = {"category": "Total", "id": "total_row", "csp_label": None}
+    for col in user_cols + ["total"]:
+        total_row[col] = sum(
+            float(df.loc[df["category"] == h, col].iloc[0]) if (df["category"] == h).any() else 0.0
+            for h in expense_headers
+        )
+    df = pd.concat([df, pd.DataFrame([total_row])], ignore_index=True)
+    return df
+
+
+def _update_guilt_free_residual(df, user_cols):
+    """Set the single guilt-free data row to income − fixed − investments − savings per column.
+
+    Called during edit mode so guilt-free always reflects the planning residual.
+    The total column is set to the sum of per-user residuals (not independently
+    derived from the total column) to avoid double-counting joint_contribution.
+    """
+    gf_mask = (df["csp_label"] == "guilt-free") & ~df["category"].isin(HEADER_ROWS)
+    if not gf_mask.any():
+        return df
+    data_rows = ~df["category"].isin(HEADER_ROWS)
+    for col in user_cols:
+        group_sums = (
+            df[data_rows & df["csp_label"].notna()]
+            .groupby("csp_label")[col]
+            .sum()
+        )
+        income_val = float(group_sums.get("income", 0))
+        residual = (
+            income_val
+            - float(group_sums.get("fixed", 0))
+            - float(group_sums.get("investments", 0))
+            - float(group_sums.get("savings", 0))
+        )
+        df.loc[gf_mask, col] = residual
+    df.loc[gf_mask, "total"] = (
+        df.loc[gf_mask, user_cols]
+        .apply(pd.to_numeric, errors="coerce")
+        .fillna(0)
+        .sum(axis=1)
+    )
+    return df
+
 
 grid = dag.AgGrid(
     id="csp-grid",
@@ -65,6 +149,8 @@ layout = html.Div([
     dbc.Container([
         dbc.Row([
             dbc.Col(html.H1('Conscious Spending Plan'), width="auto"),
+        ], className="pt-3 align-items-center"),
+        dbc.Row([
             dbc.Col(
                 dbc.Select(
                     id="csp-source",
@@ -99,10 +185,17 @@ layout = html.Div([
                 width="auto",
                 className="d-flex align-items-center",
             ),
-        ], className="pt-3 pb-3 align-items-center"),
-        html.H4("Net Worth", className="mb-2"),
-        html.Div(net_worth_grid, id="net-worth-grid-container", className="mb-4"),
-        html.H4("Spending Plan", className="mb-2"),
+            dbc.Col(
+                dbc.Switch(
+                    id="csp-misc-switch",
+                    label="Add 15% miscellaneous to Fixed Costs",
+                    value=False,
+                    className="mb-0",
+                ),
+                width="auto",
+                className="d-flex align-items-center",
+            ),
+        ], className="pt-2 pb-3 mb-2 align-items-center"),
         html.Div(grid, id="csp-grid-container", style={"height": "calc(100vh - 200px)"}),
         html.Div(
             [
@@ -251,18 +344,15 @@ def _csp_from_saved(config, users, snapshot_date=None):
     [Output("csp-grid", "rowData"),
      Output("csp-grid", "columnDefs"),
      Output("csp-grid", "getRowStyle"),
-     Output("csp-grid-container", "style"),
-     Output("net-worth-grid", "rowData"),
-     Output("net-worth-grid", "columnDefs"),
-     Output("net-worth-grid", "getRowStyle"),
-     Output("net-worth-grid-container", "style")],
+     Output("csp-grid-container", "style")],
     Input('config-store', 'data'),
     Input('csp-source', 'value'),
     Input('csp-is-editing', 'data'),
     Input('csp-snapshot-date', 'value'),
     State('transaction-data-store', 'data'),
+    State('csp-misc-switch', 'value'),
 )
-def populate_csp(config, source, is_editing, snapshot_date, transactions_json):
+def populate_csp(config, source, is_editing, snapshot_date, transactions_json, misc_enabled):
     config = json.loads(config)
     users = list(config["users"].keys())
     individual_users = [u for u in users if "members" not in config["users"][u]]
@@ -285,14 +375,6 @@ def populate_csp(config, source, is_editing, snapshot_date, transactions_json):
         config["users"][users[-1]]['csp_labels'], orient='index', columns=['csp_label']
     )
     csp = pd.merge(csp, csp_labels_df, left_on='category', right_index=True, how='left')
-    subtotals = csp.groupby('csp_label')['total'].sum()
-    subpcts = subtotals.div(subtotals.loc['income'])
-    subpcts.index = subpcts.index.map(CSP_DICT)
-
-    csp = csp.set_index('category')
-    for index, value in subpcts.items():
-        csp.loc[index, 'total'] = value
-    csp = csp.reset_index()
 
     row_data = csp.to_dict("records")
 
@@ -328,6 +410,21 @@ def populate_csp(config, source, is_editing, snapshot_date, transactions_json):
         # Insert jc_fixed as first item in Fixed Costs group (Fixed Costs header is now at fc_idx+1)
         row_data.insert(fc_idx + 2, jc_fixed_row)
 
+    # Insert miscellaneous (15%) row before Investments if enabled
+    if misc_enabled:
+        misc_row = _build_misc_row(pd.DataFrame(row_data))
+        inv_idx = next((i for i, r in enumerate(row_data) if r.get("category") == "Investments"), None)
+        if inv_idx is not None:
+            row_data.insert(inv_idx, misc_row)
+        else:
+            row_data.append(misc_row)
+
+    row_data_df = pd.DataFrame(row_data)
+    user_cols_list = [c for c in row_data_df.columns if c not in _NON_USER_COLS]
+    if is_editing:
+        row_data_df = _update_guilt_free_residual(row_data_df, user_cols_list)
+    row_data = _recalculate_headers(row_data_df).to_dict("records")
+
     user_columns = [col for col in csp.columns if col not in ["category", "csp_label", "id"]]
 
     def col_header(col):
@@ -339,15 +436,14 @@ def populate_csp(config, source, is_editing, snapshot_date, transactions_json):
         if col == "total" or not is_editing:
             return False
         is_household_col = "members" in config["users"].get(col, {})
+        locked = f"params.data.csp_label !== 'guilt-free' && params.data.id !== '{MISC_ROW_ID}'"
         if is_household_col:
-            # Household: neither jc row is editable
-            return {"function": f"!{HEADER_ROWS}.includes(params.data.category) && params.data.id !== '{JC_FIXED_ID}' && params.data.id !== '{JC_INCOME_ID}'"}
+            return {"function": f"!{HEADER_ROWS}.includes(params.data.category) && params.data.id !== '{JC_FIXED_ID}' && params.data.id !== '{JC_INCOME_ID}' && {locked}"}
         else:
-            # Individual: jc_fixed is editable, jc_income is not
-            return {"function": f"!{HEADER_ROWS}.includes(params.data.category) && params.data.id !== '{JC_INCOME_ID}'"}
+            return {"function": f"!{HEADER_ROWS}.includes(params.data.category) && params.data.id !== '{JC_INCOME_ID}' && {locked}"}
 
     columnDefs = [
-        {"field": "category", "headerName": "Category", "editable": False, "width": 200},
+        {"field": "category", "headerName": "Category", "editable": False, "width": 200, "pinned": "left"},
     ] + [
         {
             "field": col,
@@ -358,7 +454,16 @@ def populate_csp(config, source, is_editing, snapshot_date, transactions_json):
             "minWidth": 150,
             "resizable": True,
             "valueFormatter": {
-                "function": f"{HEADER_ROWS}.includes(params.data.category) ? (params.value * 100).toFixed(0) + '%' : '$' + params.value.toLocaleString('en-US', {{minimumFractionDigits: 2, maximumFractionDigits: 2}})"
+                "function": (
+                    f"params.data.category === 'Income' ? (params.value < 0 ? '($' + Math.abs(params.value || 0).toLocaleString('en-US', {{minimumFractionDigits: 0, maximumFractionDigits: 0}}) + ')' : '$' + (params.value || 0).toLocaleString('en-US', {{minimumFractionDigits: 0, maximumFractionDigits: 0}})) : "
+                    f"{HEADER_ROWS}.includes(params.data.category) ? (params.value < 0 ? '(' + Math.abs(params.value * 100).toFixed(0) + '%)' : (params.value * 100).toFixed(0) + '%') : "
+                    f"(params.value < 0 ? '($' + Math.abs(params.value).toLocaleString('en-US', {{minimumFractionDigits: 2, maximumFractionDigits: 2}}) + ')' : '$' + params.value.toLocaleString('en-US', {{minimumFractionDigits: 2, maximumFractionDigits: 2}}))"
+                )
+            },
+            "cellStyle": {
+                "function": (
+                    f"!{HEADER_ROWS}.includes(params.data.category) && params.value < 0 ? {{color: '#c53030'}} : null"
+                )
             },
             'valueParser': {'function': 'Number(params.newValue)'},
             **({"tooltipField": "total_tooltip"} if col == "total" else {}),
@@ -375,6 +480,18 @@ def populate_csp(config, source, is_editing, snapshot_date, transactions_json):
                 "style": {"backgroundColor": "#4a5568", "color": "white", "fontWeight": "bold"},
             },
             {
+                "condition": f"{HEADER_ROWS}.includes(params.data.category) && params.data.total < 0",
+                "style": {"backgroundColor": "#c53030", "color": "white", "fontWeight": "bold"},
+            },
+            {
+                "condition": "params.data.category === 'Total' && Math.abs(params.data.total - 1) > 0.001",
+                "style": {"backgroundColor": "#c53030", "color": "white", "fontWeight": "bold"},
+            },
+            {
+                "condition": f"params.data.id === '{MISC_ROW_ID}'",
+                "style": {"color": "#6b7280", "fontStyle": "italic"},
+            },
+            {
                 "condition": "params.rowIndex % 2 === 1",
                 "style": {"backgroundColor": "#f4f6f8"},
             },
@@ -385,70 +502,7 @@ def populate_csp(config, source, is_editing, snapshot_date, transactions_json):
     grid_width = category_width + len(user_columns) * data_col_width
     container_style = {"height": "calc(100vh - 200px)", "width": f"{grid_width}px", "margin": "0 auto"}
 
-    dollar_formatter = {"function": "'$' + params.value.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})"}
-    nw_data_cols = [u for u in users] + ["total"]
-
-    nw_rows = []
-    for cat in NET_WORTH_CATEGORIES:
-        row = {"category": cat}
-        for u in users:
-            saved_nw = config["users"][u].get("net_worth") or {}
-            row[u] = saved_nw.get(cat, 0)
-        row["total"] = sum(row[u] for u in users)
-        nw_rows.append(row)
-
-    total_row = {"category": NET_WORTH_TOTAL}
-    for u in users:
-        saved_nw = config["users"][u].get("net_worth") or {}
-        total_row[u] = (
-            saved_nw.get("Assets", 0)
-            + saved_nw.get("Investments", 0)
-            + saved_nw.get("Savings", 0)
-            - saved_nw.get("Debt", 0)
-        )
-    total_row["total"] = sum(total_row[u] for u in users)
-    nw_rows.append(total_row)
-
-    nw_editable_fn = (
-        {"function": f"params.data.category !== '{NET_WORTH_TOTAL}'"}
-        if is_editing else False
-    )
-
-    nw_columnDefs = [
-        {"field": "category", "headerName": "Category", "editable": False, "width": 200},
-    ] + [
-        {
-            "field": col,
-            "headerName": col_header(col),
-            "type": "number",
-            "editable": nw_editable_fn if col != "total" else False,
-            "width": 210,
-            "minWidth": 150,
-            "resizable": True,
-            "valueFormatter": dollar_formatter,
-            "valueParser": {"function": "Number(params.newValue)"},
-        }
-        for col in nw_data_cols
-    ]
-
-    nw_getRowStyle = {
-        "styleConditions": [
-            {
-                "condition": f"params.data.category === '{NET_WORTH_TOTAL}'",
-                "style": {"backgroundColor": "#4a5568", "color": "white", "fontWeight": "bold"},
-            },
-            {
-                "condition": "params.rowIndex % 2 === 1",
-                "style": {"backgroundColor": "#f4f6f8"},
-            },
-        ]}
-
-    nw_container_style = {"width": f"{grid_width}px", "margin": "0 auto"}
-
-    return (
-        row_data, columnDefs, getRowStyle, container_style,
-        nw_rows, nw_columnDefs, nw_getRowStyle, nw_container_style,
-    )
+    return row_data, columnDefs, getRowStyle, container_style
 
 
 @callback(
@@ -513,9 +567,10 @@ def initialize_save_date(is_editing):
     Input("csp-grid", "cellValueChanged"),
     State("csp-grid", "rowData"),
     State("config-store", "data"),
+    State("csp-misc-switch", "value"),
     prevent_initial_call=True,
 )
-def update_csp_total(_, row_data, config_json):
+def update_csp_total(_, row_data, config_json, misc_enabled):
     if not row_data:
         raise PreventUpdate
     config = json.loads(config_json)
@@ -524,16 +579,25 @@ def update_csp_total(_, row_data, config_json):
     household_users = [u for u in users if "members" in config["users"][u]]
 
     df = pd.DataFrame(row_data)
-    non_user_cols = {"category", "csp_label", "id", "total"}
-    user_cols = [c for c in df.columns if c not in non_user_cols]
+    user_cols = [c for c in df.columns if c not in _NON_USER_COLS]
     jc_mask = df["id"].isin([JC_FIXED_ID, JC_INCOME_ID])
-    data_rows = ~df["category"].isin(HEADER_ROWS) & ~jc_mask
-    df.loc[data_rows, "total"] = (
-        df.loc[data_rows, user_cols]
+    misc_mask = df["id"] == MISC_ROW_ID
+    gf_mask = (df["csp_label"] == "guilt-free") & ~df["category"].isin(HEADER_ROWS)
+    non_computed_data = ~df["category"].isin(HEADER_ROWS) & ~jc_mask & ~misc_mask & ~gf_mask
+
+    # Update totals for user-editable rows (guilt-free handled separately as residual)
+    df.loc[non_computed_data, "total"] = (
+        df.loc[non_computed_data, user_cols]
         .apply(pd.to_numeric, errors="coerce")
         .fillna(0)
         .sum(axis=1)
     )
+
+    # Update misc row if present (must happen before header recalculation)
+    if misc_mask.any():
+        updated_misc = _build_misc_row(df)
+        for col in user_cols + ["total"]:
+            df.loc[misc_mask, col] = updated_misc.get(col, 0)
 
     # Keep household jc_income in sync with individual jc_fixed values
     jc_fixed_mask = df["id"] == JC_FIXED_ID
@@ -552,47 +616,54 @@ def update_csp_total(_, row_data, config_json):
     # jc rows never contribute to Total — it's a transfer, not income/expense
     df.loc[jc_mask, "total"] = 0
 
-    return df.to_dict("records")
+    df = _update_guilt_free_residual(df, user_cols)
+    df = _recalculate_headers(df)
+    records = df.to_dict("records")
+    return records
 
 
 @callback(
-    Output("net-worth-grid", "rowData", allow_duplicate=True),
-    Input("net-worth-grid", "cellValueChanged"),
-    State("net-worth-grid", "rowData"),
+    Output("csp-grid", "rowData", allow_duplicate=True),
+    Input("csp-misc-switch", "value"),
+    State("csp-grid", "rowData"),
+    State("csp-is-editing", "data"),
     prevent_initial_call=True,
 )
-def update_net_worth_total(_, row_data):
+def toggle_misc_row(misc_enabled, row_data, is_editing):
     if not row_data:
         raise PreventUpdate
-    df = pd.DataFrame(row_data).set_index("category")
-    all_cols = [c for c in df.columns]
-    user_cols = [c for c in all_cols if c != "total"]
-    df[all_cols] = df[all_cols].apply(pd.to_numeric, errors="coerce").fillna(0)
+    df = pd.DataFrame(row_data)
 
-    for cat in NET_WORTH_CATEGORIES:
-        if cat in df.index:
-            df.loc[cat, "total"] = df.loc[cat, user_cols].sum()
+    # Remove any existing misc row
+    df = df[df["id"] != MISC_ROW_ID].reset_index(drop=True)
 
-    for col in all_cols:
-        assets = df.loc["Assets", col] if "Assets" in df.index else 0
-        investments = df.loc["Investments", col] if "Investments" in df.index else 0
-        savings_val = df.loc["Savings", col] if "Savings" in df.index else 0
-        debt = df.loc["Debt", col] if "Debt" in df.index else 0
-        df.loc[NET_WORTH_TOTAL, col] = assets + investments + savings_val - debt
+    if misc_enabled:
+        misc_row = _build_misc_row(df)
+        misc_df = pd.DataFrame([misc_row])
+        inv_pos = df.index[df["category"] == "Investments"]
+        if len(inv_pos) > 0:
+            pos = inv_pos[0]
+            df = pd.concat([df.iloc[:pos], misc_df, df.iloc[pos:]], ignore_index=True)
+        else:
+            df = pd.concat([df, misc_df], ignore_index=True)
 
-    return df.reset_index().to_dict("records")
+    user_cols = [c for c in df.columns if c not in _NON_USER_COLS]
+    if is_editing:
+        df = _update_guilt_free_residual(df, user_cols)
+    df = _recalculate_headers(df)
+    records = df.to_dict("records")
+    return records
 
 
 @callback(
     Output("config-store", "data", allow_duplicate=True),
     Input("save-csp", "n_clicks"),
     State("csp-grid", "rowData"),
-    State("net-worth-grid", "rowData"),
     State("config-store", "data"),
     State("csp-save-date", "value"),
     prevent_initial_call=True,
 )
-def save_csp(n, csp_row_data, nw_row_data, config_json, save_date):
+def save_csp(n, csp_row_data, config_json, save_date):
     if n is None:
         raise PreventUpdate
 
@@ -600,10 +671,13 @@ def save_csp(n, csp_row_data, nw_row_data, config_json, save_date):
     users = list(config["users"].keys())
 
     csp_df = pd.DataFrame(csp_row_data)
-    nw_df = pd.DataFrame(nw_row_data)
 
-    # Exclude group headers and the computed jc_income row (it's derived, not stored)
-    save_mask = ~csp_df["category"].isin(HEADER_ROWS) & (csp_df["id"] != JC_INCOME_ID)
+    # Exclude group headers and computed rows (jc_income, misc)
+    save_mask = (
+        ~csp_df["category"].isin(HEADER_ROWS)
+        & (csp_df["id"] != JC_INCOME_ID)
+        & (csp_df["id"] != MISC_ROW_ID)
+    )
 
     today_iso = save_date or dt.today().strftime('%Y-%m-%d')
 
@@ -622,15 +696,5 @@ def save_csp(n, csp_row_data, nw_row_data, config_json, save_date):
         csp_plans = config["users"][user].get("csp_plans") or {}
         csp_plans[today_iso] = csp_plan
         config["users"][user]["csp_plans"] = csp_plans
-
-        net_worth = (
-            nw_df[nw_df["category"] != NET_WORTH_TOTAL]
-            .set_index("category")[user]
-            .apply(pd.to_numeric, errors="coerce")
-            .fillna(0)
-            .to_dict()
-        )
-        save_csp_snapshot_to_firestore(collection_str, uid, "net_worth", net_worth)
-        config["users"][user]["net_worth"] = net_worth
 
     return json.dumps(config)
