@@ -25,6 +25,12 @@ class UserConfig(BaseModel):
     csp_plan: dict | None = None  # legacy — superseded by csp_plans
     csp_plans: dict | None = None
     net_worth: dict | None = None
+    # Maps last-4 Vanguard account number → account type label.
+    # Labels are user-defined, e.g. "IRA", "Roth IRA", "Brokerage", "403b".
+    # Drives the retirement vs non-retirement split on the Investments page.
+    investment_accounts: Dict[str, str] | None = None
+    # Maps last-4 account number → user-chosen nickname, e.g. "Work 403b".
+    investment_account_nicknames: Dict[str, str] | None = None
 
 
 class HouseholdConfig(UserConfig):
