@@ -63,3 +63,6 @@ emulator-data/
 
 # Graphify
 graphify-out
+
+# AI
+.planning
