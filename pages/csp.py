@@ -17,13 +17,13 @@ import calendar
 from core.utils import functions
 from core.services.firebase import save_csp_snapshot_to_firestore
 
-CSP_GROUPS = ['Income', 'Fixed Costs', 'Investments', 'Savings', 'Guilt Free']
+CSP_GROUPS = ['Income', 'Fixed Costs', 'Investments', 'Shrinking', 'Guilt Free']
 HEADER_ROWS = CSP_GROUPS + ['Total']
 CSP_DICT = {
     'income': 'Income',
     'fixed': 'Fixed Costs',
     'investments': 'Investments',
-    'savings': 'Savings',
+    'shrinking': 'Shrinking',
     'guilt-free': 'Guilt Free',
 }
 
@@ -95,7 +95,7 @@ def _recalculate_headers(df):
 
 
 def _update_guilt_free_residual(df, user_cols):
-    """Set the single guilt-free data row to income − fixed − investments − savings per column.
+    """Set the single guilt-free data row to income − fixed − investments − shrinking per column.
 
     Called during edit mode so guilt-free always reflects the planning residual.
     The total column is set to the sum of per-user residuals (not independently
@@ -116,7 +116,7 @@ def _update_guilt_free_residual(df, user_cols):
             income_val
             - float(group_sums.get("fixed", 0))
             - float(group_sums.get("investments", 0))
-            - float(group_sums.get("savings", 0))
+            - float(group_sums.get("shrinking", 0))
         )
         df.loc[gf_mask, col] = residual
     df.loc[gf_mask, "total"] = (

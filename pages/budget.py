@@ -16,7 +16,7 @@ from core.services.firebase import save_budget_to_firestore
 
 dash.register_page(__name__, path='/budget')
 
-CSP_GROUPS = ['Income', 'Fixed Costs', 'Investments', 'Savings', 'Guilt Free']
+CSP_GROUPS = ['Income', 'Fixed Costs', 'Investments', 'Shrinking', 'Guilt Free']
 HEADER_ROWS = CSP_GROUPS + ['Total']
 NON_BUDGETABLE = {'Total Income', 'Total Expenses', 'Total Spending', 'Unbudgeted'}
 
