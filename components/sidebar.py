@@ -1,9 +1,7 @@
 import dash
-from dash import html, dcc
 import dash_bootstrap_components as dbc
 from dash import html, dcc, callback, Input, Output, State
 import asyncio
-import pandas as pd
 from datetime import datetime as dt
 from flask import session
 
@@ -25,8 +23,6 @@ use_case_dropdown = dcc.Dropdown(
     placeholder='Select user',
     clearable=False
 )
-
-login_button = dbc.Button("Fetch", id="open-modal-button", color="dark", outline=True)
 
 login_form = html.Div(
     [
@@ -123,38 +119,78 @@ transaction_modal = dbc.Modal(
 )
 
 ### LAYOUT ###
+_nav_links = dbc.Nav(
+    [
+        dbc.NavLink([html.I(className="fas fa-chart-line"), "Actual"], href="/dash/", active="exact"),
+        dbc.NavLink([html.I(className="fas fa-clock"), "CSP"], href="/dash/csp", active="exact"),
+        dbc.NavLink([html.I(className="fas fa-wallet"), "Budget"], href="/dash/budget", active="exact"),
+        dbc.NavLink([html.I(className="fas fa-chart-bar"), "Investments"], href="/dash/investments", active="exact"),
+        dbc.NavLink([html.I(className="fas fa-arrow-trend-up"), "Trends"], href="/dash/trends", active="exact"),
+        dbc.NavLink([html.I(className="fas fa-chart-pie"), "Forecast"], href="/dash/forecast", active="exact"),
+        dbc.NavLink([html.I(className="fas fa-gear"), "Settings"], href="/dash/settings", active="exact"),
+    ],
+    vertical=True,
+)
+
+_actions = html.Div(
+    [
+        html.Div("Actions", className="mw-section-label"),
+        dbc.Button(
+            [html.I(className="fas fa-arrows-rotate"), "Sync Accounts"],
+            href="/dash/settings", className="mw-action",
+        ),
+        dbc.Button(
+            [html.I(className="fas fa-download"), "Fetch Transactions"],
+            id="open-modal-button", className="mw-action",
+        ),
+        dbc.Button(
+            [html.I(className="fas fa-upload"), "Upload Investments"],
+            href="/dash/investments", className="mw-action",
+        ),
+    ]
+)
+
+_footer = html.Div(
+    [
+        html.Div(
+            [html.I(className="fas fa-user"), html.Span(id="mw-user-email")],
+            className="mw-email",
+        ),
+        html.A([html.I(className="fas fa-right-from-bracket"), "Log out"], href="/logout"),
+    ],
+    className="mw-footer",
+)
+
 sidebar = html.Div(
     [
-        dbc.Container(
-            dbc.Row(
-                [
-                    dbc.Col(
-                        html.Div(
-                            "Please select a use case",
-                            className="text-end",
-                        ),
-                        width=8,
-                    ),
-                    dbc.Col(use_case_dropdown, width=3),
-                    dbc.Col(
-                        dbc.Button("Fetch", id="open-modal-button", color="dark", outline=True),
-                        className="text-end",
-                        width=1,
-                    ),
-                ],
-                className="align-items-center",
-            ),
+        html.Div([html.I(className="fas fa-seedling"), "Milkweed"], className="mw-brand"),
+        html.Div(
+            [html.Label("Viewing as", htmlFor="use-case"), use_case_dropdown],
+            className="mw-viewing",
         ),
+        _nav_links,
+        _actions,
+        _footer,
         login_modal,
         transaction_modal,
     ],
-    className="p-2 bg-light",
+    id="app-sidebar-root",
+    className="app-sidebar",
 )
 
 
 @callback(
+    Output("mw-user-email", "children"),
+    Input("app-sidebar-root", "id"),  # dummy input to fire on load
+)
+def show_user_email(_dummy):
+    """Populate the signed-in user's email in the sidebar footer."""
+    return session.get("email", "")
+
+
+@callback(
     Output('config-store', 'data'),
-    Input('navbar', 'id')  # dummy input to fire on load
+    Input('app-sidebar-root', 'id')  # dummy input to fire on load
 )
 def store_config(dummy):
     """

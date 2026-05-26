@@ -31,6 +31,13 @@ class UserConfig(BaseModel):
     investment_accounts: Dict[str, str] | None = None
     # Maps last-4 account number → user-chosen nickname, e.g. "Work 403b".
     investment_account_nicknames: Dict[str, str] | None = None
+    # Per transaction-account settings, keyed by Monarch account displayName
+    # (the same string stored in `accounts` and on each transaction's
+    # `account_name`). Each value is {"include": bool, "nickname": str}.
+    # `include == False` drops that account's transactions instead of saving
+    # them. Absent key → included (backward compatible with pre-control-plane
+    # configs that have no settings map).
+    transaction_account_settings: Dict[str, dict] | None = None
 
 
 class HouseholdConfig(UserConfig):

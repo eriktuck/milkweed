@@ -73,7 +73,9 @@ Firebase initialisation in `core/services/firebase.py` tries three strategies in
 
 ### Dash Page Structure
 
-`app.py` mounts Dash at `/dash/` using `use_pages=True`. Pages register themselves with `dash.register_page(__name__, path=...)`. Shared client-side state uses `dcc.Store`:
+`app.py` mounts Dash at `/dash/` using `use_pages=True`. Pages register themselves with `dash.register_page(__name__, path=...)`. `protected_layout` renders a fixed left **sidebar** (`components/sidebar.py`) alongside the page content. The sidebar holds the brand, the global **"Viewing as" (`use-case`) dropdown** consumed by most pages, nav links (Actual/CSP/Budget/Investments/Trends/Forecast/Settings), the user actions, and a footer (email + logout). User actions: **Fetch Transactions** (login + transaction modals, handled by `manage_and_handle_modals` in `components/sidebar.py`), **Sync Accounts** and **Upload Investments** (both navigate to the page that owns them — Settings and Investments respectively). The **Settings page** (`pages/settings.py`) is the control surface for editing transaction-account ownership/inclusion/nicknames (Sync Accounts), investment-account type/nickname labels, and deleting investment data.
+
+Shared client-side state uses `dcc.Store` (mounted globally in `protected_layout`, so available on every page):
 - `config-store` (session) — serialised `SessionData` JSON
 - `transaction-data-store` (memory) — full processed transactions DataFrame as JSON
 - `transaction-subset-store` (memory) — date-filtered subset
@@ -92,6 +94,8 @@ Firestore collections:
 
 Raw Monarch transactions → `convert_raw_transactions_to_dataframe` → `preprocess_transactions` (flatten nested `category`/`account` dicts) → `process_and_attribute_transactions` (splits by account owner, applies CSP category mapping from config) → Firestore via `update_firestore_transactions` (batch delete + batch set within the requested date window).
 
+During attribution, `filter_owner_transactions` drops any account marked `include == False` in that config's `transaction_account_settings` (set via Sync Accounts on the Settings page) — its transactions are not saved. Accounts with no settings entry are included, so configs predating the control plane behave unchanged.
+
 Firestore writes use `commit_in_batches` (batch size 400, hard limit 500) to avoid the Firestore 500-writes-per-batch limit.
 
 ### Financial Models (`core/models/`)
@@ -106,6 +110,6 @@ These models are used in `pages/trends.py` and are intended to back the future r
 ## Key Conventions
 
 - **CSP labels**: `fixed`, `investments`, `savings`, `guilt-free`, `income`. The mapping from Monarch category → CSP label is stored per-user in Firestore config (`csp_from_group`, `csp_from_category`, `csp_labels`).
-- **Account ownership**: Transactions are attributed to a user or household based on the `accounts` list in each config. Joint accounts live under the household document.
+- **Account ownership**: Transactions are attributed to a user or household based on the `accounts` list in each config (joint accounts live under the household document). Ownership, per-account inclusion, and nicknames are edited via **Sync Accounts** on the Settings page, which writes through `save_transaction_account_config` (`core/services/firebase.py`): it rebuilds each config's `accounts` list (one owner per account) plus a `transaction_account_settings` map (`{displayName: {include, nickname}}`).
 - **`uv` for dependency management**: `pyproject.toml` + `uv.lock` are the source of truth; `requirements.txt` is generated from them for Docker.
 - **Cloud Run service name**: `budgetbaby` (the older project name; the repo is `milkweed`).

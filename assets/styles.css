@@ -3,3 +3,149 @@
     font-weight: bold !important;
     color: #333 !important;
 }
+
+/* ===================== Control-plane sidebar nav ===================== */
+:root {
+    --mw-primary: #78c2ad;       /* MINTY primary */
+    --mw-primary-dark: #6aae9a;
+    --mw-sidebar-w: 248px;
+}
+
+.app-sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: var(--mw-sidebar-w);
+    height: 100vh;
+    background: var(--mw-primary);
+    color: #fff;
+    display: flex;
+    flex-direction: column;
+    padding: 18px 14px 14px;
+    overflow-y: auto;
+    z-index: 1030;
+}
+
+.app-sidebar .mw-brand {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    font-size: 21px;
+    font-weight: 700;
+    color: #fff;
+    padding: 2px 6px 14px;
+    letter-spacing: .2px;
+}
+
+.app-sidebar .mw-viewing {
+    padding: 0 6px 14px;
+    border-bottom: 1px solid rgba(255, 255, 255, .22);
+    margin-bottom: 6px;
+}
+.app-sidebar .mw-viewing label {
+    display: block;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: .08em;
+    color: rgba(255, 255, 255, .85);
+    margin-bottom: 5px;
+}
+/* dcc.Dropdown control sits on a white field by default — readable on green */
+.app-sidebar .mw-viewing .Select-control,
+.app-sidebar .mw-viewing .is-focused .Select-control {
+    border: none;
+    border-radius: 6px;
+}
+
+/* dbc.NavLink renders <a class="nav-link"> */
+.app-sidebar .nav-link {
+    display: flex;
+    align-items: center;
+    gap: 11px;
+    color: rgba(255, 255, 255, .92) !important;
+    padding: 9px 12px;
+    border-radius: 7px;
+    font-size: 14px;
+    font-weight: 600;
+}
+.app-sidebar .nav-link:hover {
+    background: rgba(255, 255, 255, .16);
+}
+.app-sidebar .nav-link.active {
+    background: #fff;
+    color: var(--mw-primary-dark) !important;
+}
+.app-sidebar .nav-link i {
+    width: 18px;
+    text-align: center;
+}
+
+.app-sidebar .mw-section-label {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: .1em;
+    color: rgba(255, 255, 255, .72);
+    margin: 16px 12px 8px;
+}
+
+/* action buttons (override dbc button defaults) */
+.app-sidebar .mw-action {
+    display: flex !important;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    justify-content: flex-start;
+    text-align: left;
+    background: rgba(255, 255, 255, .96);
+    color: var(--mw-primary-dark);
+    border: none;
+    border-radius: 7px;
+    padding: 9px 12px;
+    font-size: 13px;
+    font-weight: 700;
+    margin-bottom: 7px;
+}
+.app-sidebar .mw-action:hover,
+.app-sidebar .mw-action:focus,
+.app-sidebar .mw-action:active {
+    background: #fff !important;
+    color: var(--mw-primary-dark) !important;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, .13);
+}
+.app-sidebar .mw-action i {
+    width: 16px;
+    text-align: center;
+}
+
+.app-sidebar .mw-footer {
+    margin-top: auto;
+    padding: 14px 8px 2px;
+    border-top: 1px solid rgba(255, 255, 255, .22);
+    font-size: 12px;
+}
+.app-sidebar .mw-footer .mw-email {
+    color: rgba(255, 255, 255, .92);
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    margin-bottom: 9px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.app-sidebar .mw-footer a {
+    color: #fff;
+    text-decoration: none;
+    font-weight: 700;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+}
+.app-sidebar .mw-footer a:hover {
+    text-decoration: underline;
+}
+
+/* page content sits to the right of the fixed sidebar */
+.app-content {
+    margin-left: var(--mw-sidebar-w);
+}

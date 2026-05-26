@@ -1,16 +1,13 @@
 from flask import Flask, request, session, render_template, redirect, url_for
-import firebase_admin
-from firebase_admin import credentials, auth, firestore
+from firebase_admin import auth
 import os
 import dash
 from dash import Dash, html, dcc
 import dash_bootstrap_components as dbc
-from pathlib import Path
 
 from dotenv import load_dotenv
 load_dotenv(os.getenv("ENV_PATH", "secrets/env-file"))
 
-from components.navbar import navbar
 from components.sidebar import sidebar
 
 firebase_api_key = os.getenv("FIREBASE_API_KEY")
@@ -22,7 +19,7 @@ firebase_app_id = os.getenv("FIREBASE_APP_ID")
 server = Flask(__name__)
 server.secret_key = os.getenv("FLASK_SECRET_KEY", "super-secret")
 
-external_stylesheets = [dbc.themes.MINTY]
+external_stylesheets = [dbc.themes.MINTY, dbc.icons.FONT_AWESOME]
 
 app = Dash(__name__, 
            server=server,
@@ -36,9 +33,8 @@ def protected_layout():
         return html.Div("Unauthorized. Please log in at /")
     
     return html.Div([
-        navbar,
         sidebar,
-        dash.page_container,
+        html.Div(dash.page_container, className="app-content"),
         dcc.Store(id='config-store', storage_type="session", data={"trigger": True}),
         dcc.Store(id='transaction-data-store'),
         dcc.Store(id='transaction-subset-store'),

@@ -197,11 +197,54 @@ def save_budget_to_firestore(collection_str: str, uid: str, year: str | int, bud
     commit_in_batches(budget_data.items(), _write)
 
 
+def save_transaction_account_config(owner_docs: dict, assignments: dict):
+    """Persist transaction-account ownership + per-account settings.
+
+    Ownership is encoded by which config doc's ``accounts`` list contains an
+    account's displayName; ``transaction_account_settings`` holds the per-account
+    include flag and nickname. Both are rebuilt from ``assignments`` for every
+    in-scope doc so each account belongs to exactly one owner.
+
+    Parameters
+    ----------
+    owner_docs : dict[str, str]
+        ``{uid: kind}`` for every config doc in scope, where ``kind`` is
+        ``"users"`` or ``"households"``. These docs' ``accounts`` list and
+        ``transaction_account_settings`` map are rewritten.
+    assignments : dict[str, dict]
+        Keyed by account ``displayName``::
+
+            {"<displayName>": {"owner": <uid> | None,
+                               "include": bool,
+                               "nickname": str | None}}
+
+        An account with ``owner is None`` is unassigned: it is removed from
+        every doc and its transactions will not be attributed or saved.
+    """
+    for uid, kind in owner_docs.items():
+        accounts = []
+        settings = {}
+        for name, a in assignments.items():
+            if a.get("owner") != uid:
+                continue
+            accounts.append(name)
+            entry = {"include": bool(a.get("include", True))}
+            nickname = (a.get("nickname") or "").strip()
+            if nickname:
+                entry["nickname"] = nickname
+            settings[name] = entry
+
+        db.collection(kind).document(uid).set(
+            {"accounts": accounts, "transaction_account_settings": settings},
+            merge=True,
+        )
+
+
 def update_firestore_transactions(
-        collection_str: str, 
-        uid: str, 
-        txn_df: pd.DataFrame, 
-        start_date: str, 
+        collection_str: str,
+        uid: str,
+        txn_df: pd.DataFrame,
+        start_date: str,
         end_date: str
     ):
     # Format string dates

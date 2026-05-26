@@ -11,7 +11,6 @@ from flask import session
 from core.services.investments import (
     ASSET_CLASS_MAP,
     compute_ytd_contributions,
-    delete_investment_data,
     fetch_investment_transactions,
     fetch_latest_holdings,
     reconstruct_portfolio_history,
@@ -165,58 +164,16 @@ _account_modal = dbc.Modal(
     is_open=False,
 )
 
-# ── Delete-data confirmation modal ────────────────────────────────────────────
-
-_delete_modal = dbc.Modal(
-    [
-        dbc.ModalHeader(dbc.ModalTitle("Delete Investment Data")),
-        dbc.ModalBody([
-            html.P(
-                "This permanently deletes all your investment holdings, "
-                "transaction history, and account labels from the database."
-            ),
-            html.P("This cannot be undone.", className="fw-bold text-danger mb-0"),
-        ]),
-        dbc.ModalFooter([
-            dbc.Button("Cancel", id="delete-data-cancel", color="secondary", className="me-2"),
-            dbc.Button("Delete everything", id="delete-data-confirm", color="danger"),
-        ]),
-    ],
-    id="delete-data-modal",
-    is_open=False,
-)
-
 # ── Page layout ───────────────────────────────────────────────────────────────
 
 layout = html.Div([
     dcc.Store(id="accounts-for-modal", storage_type="memory"),
     _account_modal,
-    _delete_modal,
     dbc.Container([
 
         # Header
         dbc.Row([
             dbc.Col(html.H1("Investments"), width="auto"),
-            dbc.Col(
-                dbc.Button(
-                    [html.I(className="fas fa-cog me-1"), "Edit Accounts"],
-                    id="edit-accounts-btn",
-                    color="outline-secondary",
-                    size="sm",
-                ),
-                width="auto",
-                className="d-flex align-items-center",
-            ),
-            dbc.Col(
-                dbc.Button(
-                    [html.I(className="fas fa-trash me-1"), "Delete Investment Data"],
-                    id="delete-data-btn",
-                    color="outline-danger",
-                    size="sm",
-                ),
-                width="auto",
-                className="d-flex align-items-center",
-            ),
             dbc.Col(investment_upload, width=4, className="ms-auto d-flex align-items-center"),
         ], className="pt-3 pb-2", align="center"),
 
@@ -530,27 +487,6 @@ def open_modal_on_new_accounts(new_accounts):
 
 
 @callback(
-    Output("accounts-for-modal", "data", allow_duplicate=True),
-    Input("edit-accounts-btn", "n_clicks"),
-    State("config-store", "data"),
-    prevent_initial_call=True,
-)
-def open_modal_on_edit(n_clicks, config_data):
-    if not n_clicks:
-        raise dash.exceptions.PreventUpdate
-
-    uid = session.get("user_id")
-    if not uid:
-        raise dash.exceptions.PreventUpdate
-
-    holdings = fetch_latest_holdings(uid)
-    accounts = sorted({h.get("account_number", "") for h in holdings if h.get("account_number")})
-    if not accounts:
-        raise dash.exceptions.PreventUpdate
-    return {"accounts": accounts, "mode": "edit"}
-
-
-@callback(
     Output("account-modal-body", "children"),
     Output("account-modal", "is_open"),
     Input("accounts-for-modal", "data"),
@@ -687,61 +623,3 @@ def cancel_account_modal(n_clicks):
     if not n_clicks:
         raise dash.exceptions.PreventUpdate
     return False
-
-
-# ── Delete-data callbacks ─────────────────────────────────────────────────────
-
-@callback(
-    Output("delete-data-modal", "is_open", allow_duplicate=True),
-    Input("delete-data-btn", "n_clicks"),
-    prevent_initial_call=True,
-)
-def open_delete_modal(n_clicks):
-    if not n_clicks:
-        raise dash.exceptions.PreventUpdate
-    return True
-
-
-@callback(
-    Output("delete-data-modal", "is_open", allow_duplicate=True),
-    Input("delete-data-cancel", "n_clicks"),
-    prevent_initial_call=True,
-)
-def cancel_delete_modal(n_clicks):
-    if not n_clicks:
-        raise dash.exceptions.PreventUpdate
-    return False
-
-
-@callback(
-    Output("delete-data-modal", "is_open", allow_duplicate=True),
-    Output("investments-data-version", "data", allow_duplicate=True),
-    Output("config-store", "data", allow_duplicate=True),
-    Input("delete-data-confirm", "n_clicks"),
-    State("investments-data-version", "data"),
-    State("config-store", "data"),
-    prevent_initial_call=True,
-)
-def confirm_delete_data(n_clicks, current_version, config_data):
-    if not n_clicks:
-        raise dash.exceptions.PreventUpdate
-
-    uid = session.get("user_id")
-    if not uid:
-        raise dash.exceptions.PreventUpdate
-
-    delete_investment_data(uid)
-
-    # Clear investment config fields from the in-memory store so the UI matches.
-    cfg = {}
-    if config_data:
-        try:
-            cfg = json.loads(config_data)
-        except Exception:
-            cfg = {}
-    user_cfg = cfg.get("users", {}).get(uid)
-    if isinstance(user_cfg, dict):
-        user_cfg.pop("investment_accounts", None)
-        user_cfg.pop("investment_account_nicknames", None)
-
-    return False, (current_version or 0) + 1, json.dumps(cfg)

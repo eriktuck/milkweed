@@ -33,12 +33,24 @@ def preprocess_transactions(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def filter_owner_transactions(df: pd.DataFrame, user_config: dict):
-    """Split transactions by owner based on account ownership in config."""
+    """Split transactions by owner based on account ownership in config.
+
+    Accounts explicitly marked ``include == False`` in
+    ``transaction_account_settings`` are dropped (their transactions are not
+    saved). Accounts with no settings entry are included, so configs written
+    before the control plane behave exactly as before.
+    """
     accounts = user_config.get("accounts", [])
     name = user_config.get("name", "unknown")
 
+    settings = user_config.get("transaction_account_settings") or {}
+    included_accounts = [
+        acct for acct in accounts
+        if settings.get(acct, {}).get("include", True)
+    ]
+
     # Filter rows
-    filt = df["account_name"].isin(accounts)
+    filt = df["account_name"].isin(included_accounts)
     subset = df.loc[filt].copy()
 
     # Tag owner
