@@ -56,6 +56,17 @@
     border: none;
     border-radius: 6px;
 }
+/* selected value, typed input, and placeholder all default to inherited
+   white text, which is invisible on the white control — force dark text */
+.app-sidebar .mw-viewing .Select-value-label,
+.app-sidebar .mw-viewing .Select--single > .Select-control .Select-value .Select-value-label,
+.app-sidebar .mw-viewing .Select-input > input,
+.app-sidebar .mw-viewing .Select-placeholder {
+    color: #1a1a1a;
+}
+.app-sidebar .mw-viewing .Select-menu-outer {
+    color: #1a1a1a;
+}
 
 /* dbc.NavLink renders <a class="nav-link"> */
 .app-sidebar .nav-link {
