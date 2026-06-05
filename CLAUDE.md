@@ -23,7 +23,7 @@ uv run python -m scripts.seed_emulator --start-date 2024-01-01  # wider range
 # After seeding: firebase emulators:export ./emulator-data (to persist for next session)
 
 # Run with Docker Compose (prod — mirrors Cloud Run)
-docker compose up --build
+docker compose --profile prod up --build
 
 # Run with Docker Compose against the Firebase emulator
 firebase emulators:start                          # terminal 1

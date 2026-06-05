@@ -11,6 +11,8 @@ services:
     volumes:
       - ./secrets:/app/secrets
     restart: unless-stopped
+    profiles:
+      - prod
 
   budgetbaby-dev:
     build: .
