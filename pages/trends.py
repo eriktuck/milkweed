@@ -17,10 +17,10 @@ _GROUP_DISPLAY = {
     'income': 'Income',
     'fixed': 'Fixed Expenses',
     'investments': 'Investments',
-    'shrinking': 'Shrinking',
+    'sinking': 'Sinking',
     'guilt-free': 'Guilt-free Spending',
 }
-_GROUP_ORDER = ['income', 'fixed', 'investments', 'shrinking', 'guilt-free']
+_GROUP_ORDER = ['income', 'fixed', 'investments', 'sinking', 'guilt-free']
 
 layout = html.Div([
     dcc.Store(id='trends-drilldown', data=None),
@@ -175,14 +175,14 @@ def toggle_filter_panel(n_clicks, is_open):
     Output('trends-filter-income', 'value', allow_duplicate=True),
     Output('trends-filter-fixed', 'value', allow_duplicate=True),
     Output('trends-filter-investments', 'value', allow_duplicate=True),
-    Output('trends-filter-shrinking', 'value', allow_duplicate=True),
+    Output('trends-filter-sinking', 'value', allow_duplicate=True),
     Output('trends-filter-guilt-free', 'value', allow_duplicate=True),
     Input('trends-filter-select-all', 'n_clicks'),
     Input('trends-filter-deselect-all', 'n_clicks'),
     State('trends-filter-income', 'options'),
     State('trends-filter-fixed', 'options'),
     State('trends-filter-investments', 'options'),
-    State('trends-filter-shrinking', 'options'),
+    State('trends-filter-sinking', 'options'),
     State('trends-filter-guilt-free', 'options'),
     prevent_initial_call=True,
 )
@@ -199,8 +199,8 @@ def bulk_select_filter(_, __, *options_per_group):
     Output('trends-filter-fixed', 'value'),
     Output('trends-filter-investments', 'options'),
     Output('trends-filter-investments', 'value'),
-    Output('trends-filter-shrinking', 'options'),
-    Output('trends-filter-shrinking', 'value'),
+    Output('trends-filter-sinking', 'options'),
+    Output('trends-filter-sinking', 'value'),
     Output('trends-filter-guilt-free', 'options'),
     Output('trends-filter-guilt-free', 'value'),
     Input('transaction-data-store', 'data'),
@@ -254,18 +254,18 @@ def update_drilldown(click_data, _back, _use_case, current_drilldown):
     Input('trends-filter-income', 'value'),
     Input('trends-filter-fixed', 'value'),
     Input('trends-filter-investments', 'value'),
-    Input('trends-filter-shrinking', 'value'),
+    Input('trends-filter-sinking', 'value'),
     Input('trends-filter-guilt-free', 'value'),
 )
 def update_trends_chart(transactions_data, start_date, end_date, smoothing,
                          display, use_case, drilldown,
-                         f_income, f_fixed, f_investments, f_shrinking, f_guilt_free):
+                         f_income, f_fixed, f_investments, f_sinking, f_guilt_free):
     if not transactions_data or not use_case:
         raise PreventUpdate
 
     transactions = pd.read_json(StringIO(transactions_data), orient='split')
 
-    selected = (f_income or []) + (f_fixed or []) + (f_investments or []) + (f_shrinking or []) + (f_guilt_free or [])
+    selected = (f_income or []) + (f_fixed or []) + (f_investments or []) + (f_sinking or []) + (f_guilt_free or [])
     if selected:
         transactions = transactions[transactions['category_name'].isin(selected)]
 

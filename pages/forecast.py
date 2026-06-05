@@ -187,9 +187,9 @@ def seed_defaults(config_data, txn_json):
         except Exception:
             contribution_hint = ""
 
-    spend_hint = "from CSP plan (fixed + guilt-free)" if annual_spend else "no CSP plan — enter manually"
+    spend_hint = "from CSP plan (fixed + guilt-free + sinking)" if annual_spend else "no CSP plan — enter manually"
     if not contribution_hint:
-        contribution_hint = "from CSP plan (shrinking)" if monthly else "no CSP plan — enter manually"
+        contribution_hint = "from CSP plan (investments)" if monthly else "no CSP plan — enter manually"
 
     portfolio_value = current_portfolio_value(uid)
     meta = (

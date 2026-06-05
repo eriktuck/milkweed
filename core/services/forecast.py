@@ -22,18 +22,15 @@ from core.services.investments import fetch_latest_holdings
 # Safe withdrawal rate — fixed in v1.
 SWR = 0.04
 
-# CSP labels (see CLAUDE.md): fixed · investments · shrinking · guilt-free · income.
-CONTRIBUTION_LABELS: frozenset[str] = frozenset({"shrinking"})
-RETIREMENT_SPEND_LABELS: frozenset[str] = frozenset({"fixed", "guilt-free"})
-
-# Categories filed under the `shrinking` label that are really recurring living
-# expenses (sinking funds for lumpy costs), NOT portfolio contributions. They
-# continue in retirement, so they count toward retirement spend and must be
-# excluded from the contribution lever to avoid double-counting.
-# NOTE: these must match the user's CSP *category* keys exactly.
-DEFERRED_EXPENSE_CATEGORIES: frozenset[str] = frozenset({
-    "gifts", "vacations", "home_improvements",
-})
+# CSP labels (see CLAUDE.md): fixed · investments · sinking · guilt-free · income.
+#
+# Portfolio contributions are the `investments` label (the Monarch "Savings" csp
+# key — money moved into long-term investment accounts). The `sinking` label is
+# sinking funds for near/midterm goals (gifts/vacations/home improvements); those
+# are recurring living expenses that persist in retirement, so they count toward
+# retirement spend, NOT the contribution lever.
+CONTRIBUTION_LABELS: frozenset[str] = frozenset({"investments"})
+RETIREMENT_SPEND_LABELS: frozenset[str] = frozenset({"fixed", "guilt-free", "sinking"})
 
 
 # ── Data-derived inputs ────────────────────────────────────────────────────────
@@ -58,33 +55,12 @@ def _sum_plan_for_labels(
     )
 
 
-def _sum_plan_for_categories(
-    active_plan: dict | None, categories: frozenset[str]
-) -> float:
-    """Sum monthly CSP-plan amounts for specific category keys."""
-    if not active_plan:
-        return 0.0
-    return sum(
-        float(amount)
-        for category, amount in active_plan.items()
-        if category in categories
-    )
-
-
 def default_monthly_contribution(
     active_plan: dict | None, csp_labels: dict | None
 ) -> float:
-    """Default monthly portfolio contribution = Σ monthly CSP plan for `shrinking`,
-    excluding sinking-fund categories that are really deferred expenses
-    (gifts/vacations/home improvements) rather than money invested."""
-    if not active_plan or not csp_labels:
-        return 0.0
-    return sum(
-        float(amount)
-        for category, amount in active_plan.items()
-        if csp_labels.get(category) in CONTRIBUTION_LABELS
-        and category not in DEFERRED_EXPENSE_CATEGORIES
-    )
+    """Default monthly portfolio contribution = Σ monthly CSP plan for the
+    `investments` label (long-term money moved into investment accounts)."""
+    return _sum_plan_for_labels(active_plan, csp_labels, CONTRIBUTION_LABELS)
 
 
 def default_annual_retirement_spend(
@@ -92,44 +68,34 @@ def default_annual_retirement_spend(
 ) -> float:
     """Default annual retirement spend = 12 × Σ monthly recurring living expenses.
 
-    Recurring expenses are the `fixed` + `guilt-free` labels PLUS the deferred-
-    expense shrinking categories (gifts/vacations/home improvements), which persist
-    in retirement. Pure portfolio contributions (`investments` and the remaining
-    `shrinking`) stop at retirement and are excluded.
+    Recurring expenses are the `fixed`, `guilt-free`, and `sinking` labels —
+    the last being sinking funds (gifts/vacations/home improvements) that persist
+    in retirement. Portfolio contributions (`investments`) stop at retirement and
+    are excluded.
     """
-    living = _sum_plan_for_labels(active_plan, csp_labels, RETIREMENT_SPEND_LABELS)
-    deferred = _sum_plan_for_categories(active_plan, DEFERRED_EXPENSE_CATEGORIES)
-    return 12.0 * (living + deferred)
+    return 12.0 * _sum_plan_for_labels(active_plan, csp_labels, RETIREMENT_SPEND_LABELS)
 
 
 def trailing_12mo_contribution(txn_df: pd.DataFrame | None) -> float:
     """Average monthly actual contribution over the trailing 12 months.
 
-    Sums the magnitude of `shrinking`-labeled transactions in the 12 months
-    preceding the most recent transaction date, divided by 12 — excluding the
-    deferred-expense shrinking categories (gifts/vacations/home improvements) so
-    the hint reflects money actually invested. Returns 0.0 when no usable data.
+    Sums the magnitude of `investments`-labeled transactions in the 12 months
+    preceding the most recent transaction date, divided by 12, so the hint
+    reflects money actually invested. Returns 0.0 when no usable data.
     """
     if txn_df is None or len(txn_df) == 0:
         return 0.0
     if "csp_label" not in txn_df.columns or "amount" not in txn_df.columns or "date" not in txn_df.columns:
         return 0.0
 
-    cols = ["date", "csp_label", "amount"]
-    has_category = "csp" in txn_df.columns
-    if has_category:
-        cols.append("csp")
-    df = txn_df[cols].copy()
+    df = txn_df[["date", "csp_label", "amount"]].copy()
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
     df = df.dropna(subset=["date"])
     if df.empty:
         return 0.0
 
     cutoff = df["date"].max() - pd.DateOffset(months=12)
-    mask = (df["date"] > cutoff) & (df["csp_label"].isin(CONTRIBUTION_LABELS))
-    if has_category:
-        mask &= ~df["csp"].isin(DEFERRED_EXPENSE_CATEGORIES)
-    recent = df[mask]
+    recent = df[(df["date"] > cutoff) & (df["csp_label"].isin(CONTRIBUTION_LABELS))]
     if recent.empty:
         return 0.0
 

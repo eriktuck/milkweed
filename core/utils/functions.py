@@ -416,7 +416,7 @@ def build_budget_report(transactions, budget, start_date, end_date, config, user
 
     # Add CSP categories and sort to order
     df = df.set_index('csp')
-    csp_groups = ['Income', 'Fixed Costs', 'Investments', 'Shrinking', 'Guilt Free']
+    csp_groups = ['Income', 'Fixed Costs', 'Investments', 'Sinking', 'Guilt Free']
     new_rows = pd.DataFrame(np.nan, index=csp_groups, columns=df.columns)
     df = pd.concat([df, new_rows])
 
@@ -554,7 +554,7 @@ def plot_report(budget_report, start_date, end_date):
     
     # Add line for each Group
     for group in ['Income', 'Guilt Free', 'Fixed Costs', 'Investments',
-                  'Shrinking']:
+                  'Sinking']:
         fig.add_shape(
             type='line',
             x0=0,
@@ -619,7 +619,7 @@ def plot_report(budget_report, start_date, end_date):
         tickvals=np.arange(len(y)),
         ticktext=[f'<b>{label}</b>' if label in [
             'Total Income', 'Total Spending', 'Income', 'Guilt Free',
-            'Fixed Costs', 'Investments', 'Shrinking']
+            'Fixed Costs', 'Investments', 'Sinking']
                     else label for label in y]
         )
     
@@ -914,13 +914,13 @@ def plot_spending_trends(transactions, owner_uid, start_date, end_date,
     csp_colors = {
         'fixed': '#F3969A',
         'investments': '#78C2AD',
-        'shrinking': '#FFCE67',
+        'sinking': '#FFCE67',
         'guilt-free': '#6f42c1',
         'income': '#888',
     }
     fallback_colors = ['#78c2ad', '#f3969a', '#ffce67', '#6f42c1', '#5bc0be', '#d972ff']
 
-    label_order = ['fixed', 'investments', 'shrinking', 'guilt-free']
+    label_order = ['fixed', 'investments', 'sinking', 'guilt-free']
     if drilldown_label:
         ordered_cols = list(pivot.columns)
     else:
@@ -991,7 +991,7 @@ def plot_csp_by_label(processed_transactions, as_percent):
     df['value'] = df['value'].abs()
 
     # Define the desired order
-    desired_order = ["fixed", "investments", "guilt-free", "shrinking"]
+    desired_order = ["fixed", "investments", "guilt-free", "sinking"]
 
     # Pivot the DataFrame to reshape it for calculations
     pivot_df = df.pivot(index="date", columns="csp_label", values="value").fillna(0)
