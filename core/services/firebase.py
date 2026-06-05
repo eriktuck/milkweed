@@ -197,6 +197,23 @@ def save_budget_to_firestore(collection_str: str, uid: str, year: str | int, bud
     commit_in_batches(budget_data.items(), _write)
 
 
+def fetch_budget(owner_id: str, year: int, month: int) -> dict:
+    """Fetch one month's budget for an owner: {csp_key: amount}.
+
+    Budgets live under `{users|households}/{owner_id}/budgets/{YYYY-MM}` and are
+    keyed by CSP key (the same keys as `csp_labels`). `owner_id` is unique to one
+    collection, so we check households then users and return the first that exists
+    (empty dict if neither has a budget for that month).
+    """
+    doc_id = f"{year}-{int(month):02d}"
+    for kind in ("households", "users"):
+        snap = (db.collection(kind).document(owner_id)
+                .collection("budgets").document(doc_id).get())
+        if snap.exists:
+            return snap.to_dict() or {}
+    return {}
+
+
 def save_transaction_account_config(owner_docs: dict, assignments: dict):
     """Persist transaction-account ownership + per-account settings.
 

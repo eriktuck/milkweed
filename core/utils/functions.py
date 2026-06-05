@@ -882,12 +882,12 @@ def plot_spending_trends(transactions, owner_uid, start_date, end_date,
 
     df['date'] = pd.to_datetime(df['date'], utc=True)
 
-    # Compute income by period before any drilldown filter (used for normalization and reference line)
+    # Compute income by period before any drilldown filter (used for normalization and reference line).
+    # Income is stored positive — sum as-is (no abs).
     income_by_period = (
         df[df['csp_label'] == 'income']
         .groupby(pd.Grouper(key='date', freq=smoothing))['amount']
         .sum()
-        .abs()
     )
 
     group_col = 'csp' if drilldown_label else 'csp_label'
@@ -901,9 +901,19 @@ def plot_spending_trends(transactions, owner_uid, start_date, end_date,
     )
     result.columns = ['date', group_col, 'amount']
 
+    # Show spending as positive by negating signed amounts (expenses are stored
+    # negative); never abs() — a net-credit period must stay negative. Income is
+    # already positive, so leave any income column / income drill-down untouched.
     pivot = result.pivot_table(
         index='date', columns=group_col, values='amount', aggfunc='sum'
-    ).fillna(0).abs()
+    ).fillna(0)
+    if drilldown_label == 'income':
+        pass  # income subcategories stay positive
+    elif drilldown_label:
+        pivot = pivot.mul(-1)  # subcategories of a spending bucket
+    else:
+        spend_cols = [c for c in pivot.columns if c != 'income']
+        pivot.loc[:, spend_cols] = pivot[spend_cols].mul(-1)
 
     if as_percent:
         ref_income = income_by_period.reindex(pivot.index).replace(0, np.nan)
