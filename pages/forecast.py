@@ -24,6 +24,12 @@ from core.services.forecast import (
     project_portfolio,
     trailing_12mo_contribution,
 )
+from core.services.investments import fetch_latest_holdings
+from core.services.returns import (
+    bootstrap_projection,
+    build_returns_payload,
+    percentile_bands,
+)
 
 dash.register_page(__name__, path="/forecast")
 
@@ -33,6 +39,16 @@ _C_GROWTH = "#4ade80"      # green — market growth
 _C_TARGET = "#f59e0b"      # amber — CoastFIRE target / retirement
 _C_TOTAL = "#444444"       # total value line
 _C_WORKING = "#3b82f6"
+
+# Asset-class line colors for the historical-returns chart.
+_CLASS_COLORS = {
+    "US Equity": "#3b82f6",
+    "Intl Equity": "#8b5cf6",
+    "Bonds": "#f59e0b",
+    "Cash": "#9ca3af",
+    "Other": "#14b8a6",
+}
+_C_INFLATION = "#ef4444"   # red — inflation line
 
 _HORIZON_AGE = 90          # planning horizon (fixed in v1; Concept B has no input)
 
@@ -94,6 +110,9 @@ _input_bar = dbc.Card(dbc.CardBody(dbc.Row([
             _num_input("fc-real-return", 5.0, min=0, max=15, step=0.5),
             dbc.InputGroupText("%"),
         ], size="sm"),
+        dbc.Switch(id="fc-use-suggested", label="Use suggested rate",
+                   value=False, className="small mt-1"),
+        html.Small(id="fc-suggested-hint", className="text-muted"),
     ], width="auto"),
     dbc.Col([
         dbc.Label("Annual retirement spend", className="small text-muted mb-1"),
@@ -110,6 +129,7 @@ _input_bar = dbc.Card(dbc.CardBody(dbc.Row([
 # ── Page layout ───────────────────────────────────────────────────────────────
 
 layout = html.Div([
+    dcc.Store(id="fc-returns-store", storage_type="memory"),
     dbc.Container([
         dbc.Row([
             dbc.Col(html.H1("Forecast"), width="auto"),
@@ -140,6 +160,34 @@ layout = html.Div([
                 dcc.Loading(dcc.Graph(id="fc-donut-chart", config={"displayModeBar": False}), type="circle"),
                 html.P(id="fc-insight", className="text-muted small mt-2 mb-0"),
             ])), width=4),
+        ], className="mb-4"),
+
+        # ── Rate of return & inflation (educational detail) ──────────────────
+        dbc.Row([
+            dbc.Col([
+                html.H4("Rate of return & inflation", className="mb-1"),
+                html.P(
+                    "Historical, inflation-adjusted context for the return rate above — "
+                    "grounded in your own asset mix. Markets are stochastic; the simulation "
+                    "shows a range of likely outcomes, not a guarantee.",
+                    className="text-muted small mb-0",
+                ),
+            ]),
+        ], className="pt-2 pb-2"),
+
+        dbc.Row([
+            dbc.Col(dbc.Card(dbc.CardBody([
+                html.P("Historical real (inflation-adjusted) returns by asset class, with inflation",
+                       className="text-muted small mb-2"),
+                dcc.Loading(dcc.Graph(id="fc-class-returns-chart",
+                                      config={"displayModeBar": False}), type="circle"),
+            ])), xs=12, lg=6, className="mb-3 mb-lg-0"),
+            dbc.Col(dbc.Card(dbc.CardBody([
+                html.P("Likely outcomes — MCMC bootstrap", className="text-muted small mb-2"),
+                dcc.Loading(dcc.Graph(id="fc-fan-chart",
+                                      config={"displayModeBar": False}), type="circle"),
+                html.P(id="fc-fan-caption", className="text-muted small mt-2 mb-0"),
+            ])), xs=12, lg=6),
         ], className="mb-4"),
 
     ], fluid=False),
@@ -429,3 +477,207 @@ def _donut_figure(df, retirement_age, summary, real_return):
         f"goal by {retirement_age}."
     )
     return fig, insight
+
+
+# ── Rate of return & inflation: heavy compute (off the hot path) ─────────────────
+
+@callback(
+    Output("fc-returns-store", "data"),
+    Input("config-store", "data"),
+)
+def compute_returns_data(config_data):
+    """Run the network-bound yfinance/cpi/return analytics ONCE per page visit.
+
+    Driven by config-store (fires on mount). Decoupled from `recompute` so the
+    fast hot path never touches the network. Results land in fc-returns-store.
+    """
+    uid = session.get("user_id")
+    if not uid:
+        raise dash.exceptions.PreventUpdate
+    holdings = fetch_latest_holdings(uid)
+    return build_returns_payload(holdings)
+
+
+# ── Suggested-rate opt-in ────────────────────────────────────────────────────────
+
+@callback(
+    Output("fc-real-return", "value", allow_duplicate=True),
+    Output("fc-real-return", "disabled"),
+    Output("fc-suggested-hint", "children"),
+    Input("fc-use-suggested", "value"),
+    Input("fc-returns-store", "data"),
+    State("fc-real-return", "value"),
+    prevent_initial_call=True,
+)
+def apply_suggested_rate(use_suggested, store, current_value):
+    """Fill `fc-real-return` with the suggested median real return when toggled on.
+
+    No loop: `fc-real-return.value` is State here (not Input), and no other
+    callback writes it, so setting it cannot re-trigger this callback.
+    """
+    if use_suggested and store and store.get("ok"):
+        pct = store.get("suggested_real_return_pct", 0.0)
+        hint = f"using suggested median ({pct:.1f}% real)"
+        return pct, True, hint
+    if use_suggested:
+        # Toggle on but no data yet — re-enable and explain.
+        return dash.no_update, False, "no suggestion available — add holdings"
+    # Toggle off: re-enable manual editing, keep the current value.
+    return dash.no_update, False, ""
+
+
+# ── Detail charts (read the store; no network) ───────────────────────────────────
+
+@callback(
+    Output("fc-class-returns-chart", "figure"),
+    Input("fc-returns-store", "data"),
+)
+def render_asset_class_chart(store):
+    if not store or not store.get("ok"):
+        msg = (store or {}).get("message", "No data") if store else "Loading…"
+        return _detail_empty(msg)
+    return _class_returns_figure(store)
+
+
+@callback(
+    Output("fc-fan-chart", "figure"),
+    Output("fc-fan-caption", "children"),
+    Input("fc-returns-store", "data"),
+    Input("fc-current-age", "value"),
+    Input("fc-coast-age", "value"),
+    Input("fc-retirement-age", "value"),
+    Input("fc-monthly-contribution", "value"),
+)
+def render_fan_chart(store, current_age, coast_age, retirement_age, monthly_contribution):
+    if not store or not store.get("ok") or not store.get("real_return_pool"):
+        return _detail_empty((store or {}).get("message", "No data") if store else "Loading…"), ""
+
+    msg = _validation_message(current_age, coast_age, retirement_age)
+    if msg:
+        return _detail_empty(msg), ""
+
+    uid = session.get("user_id")
+    start_value = current_portfolio_value(uid) if uid else 0.0
+    current_age, coast_age, retirement_age = int(current_age), int(coast_age), int(retirement_age)
+    annual_contribution = float(monthly_contribution or 0) * 12
+
+    horizon_years = max(retirement_age - current_age, 0)
+    if horizon_years == 0:
+        return _detail_empty("Retirement age must be after current age."), ""
+
+    # Contribute during the working phase only (age < coast_age).
+    contribs = [annual_contribution if (current_age + t) < coast_age else 0.0
+                for t in range(horizon_years)]
+
+    sims = bootstrap_projection(
+        store["real_return_pool"], start_value, contribs, horizon_years,
+    )
+    bands = percentile_bands(sims)
+    ages = list(range(current_age + 1, current_age + 1 + horizon_years))
+
+    fig = _fan_figure(bands, ages, start_value, current_age, retirement_age)
+    n_years = store.get("n_years", 0)
+    caption = (
+        f"1,000 bootstrap simulations resampling {n_years} years of your portfolio's "
+        f"real returns. Bands show the 10th–90th and 25th–75th (IQR) percentiles; "
+        f"the line is the median outcome at age {retirement_age}."
+    )
+    return fig, caption
+
+
+# ── Detail figure builders ───────────────────────────────────────────────────────
+
+def _detail_empty(message: str) -> go.Figure:
+    fig = go.Figure()
+    fig.update_layout(
+        **_CHART_LAYOUT, height=280, margin=dict(l=10, r=10, t=30, b=10),
+        xaxis=dict(visible=False), yaxis=dict(visible=False),
+        annotations=[{"text": message, "xref": "paper", "yref": "paper",
+                      "x": 0.5, "y": 0.5, "showarrow": False,
+                      "font": {"color": "#999", "size": 13}}] if message else [],
+    )
+    return fig
+
+
+def _class_returns_figure(store) -> go.Figure:
+    fig = go.Figure()
+    class_returns = store.get("class_real_returns", {})
+    for cls, series in class_returns.items():
+        years = sorted(int(y) for y in series.keys())
+        if not years:
+            continue
+        fig.add_trace(go.Scatter(
+            x=years, y=[series[str(y)] if str(y) in series else series[y] for y in years],
+            name=cls, mode="lines",
+            line=dict(width=1.5, color=_CLASS_COLORS.get(cls, "#888")),
+            hovertemplate=f"{cls} · %{{x}}<br>%{{y:.1%}} real<extra></extra>",
+        ))
+
+    weighted = store.get("weighted_avg", {})
+    if weighted:
+        wyears = sorted(int(y) for y in weighted.keys())
+        fig.add_trace(go.Scatter(
+            x=wyears, y=[weighted[str(y)] if str(y) in weighted else weighted[y] for y in wyears],
+            name="Portfolio weighted avg", mode="lines",
+            line=dict(width=3, color=_C_TOTAL),
+            hovertemplate="Weighted avg · %{x}<br>%{y:.1%} real<extra></extra>",
+        ))
+
+    inflation = store.get("inflation", {})
+    if inflation:
+        iyears = sorted(int(y) for y in inflation.keys())
+        fig.add_trace(go.Scatter(
+            x=iyears, y=[inflation[str(y)] if str(y) in inflation else inflation[y] for y in iyears],
+            name="Inflation", mode="lines",
+            line=dict(width=1.5, color=_C_INFLATION, dash="dot"),
+            hovertemplate="Inflation · %{x}<br>%{y:.1%}<extra></extra>",
+        ))
+
+    fig.add_hline(y=0, line_color="#ccc", line_width=1)
+    fig.update_layout(
+        **_CHART_LAYOUT, height=300, margin=dict(l=10, r=10, t=30, b=10),
+        xaxis=dict(title="Year", showgrid=False),
+        yaxis=dict(title=None, tickformat=".0%", showgrid=True, gridcolor="#eee", zeroline=False),
+        hovermode="x unified",
+    )
+    return fig
+
+
+def _fan_figure(bands, ages, start_value, current_age, retirement_age) -> go.Figure:
+    # Prepend the starting point at current_age so every band shares an origin.
+    x = [current_age] + ages
+    def _band(p):
+        return [start_value] + bands.get(p, [])
+
+    fig = go.Figure()
+    # Outer band P10–P90 (light), then IQR P25–P75 (darker), then median line.
+    fig.add_trace(go.Scatter(
+        x=x, y=_band(90), mode="lines", line=dict(width=0),
+        showlegend=False, hoverinfo="skip",
+    ))
+    fig.add_trace(go.Scatter(
+        x=x, y=_band(10), mode="lines", line=dict(width=0), fill="tonexty",
+        fillcolor="rgba(91,126,201,0.15)", name="10th–90th pct",
+        hoverinfo="skip",
+    ))
+    fig.add_trace(go.Scatter(
+        x=x, y=_band(75), mode="lines", line=dict(width=0),
+        showlegend=False, hoverinfo="skip",
+    ))
+    fig.add_trace(go.Scatter(
+        x=x, y=_band(25), mode="lines", line=dict(width=0), fill="tonexty",
+        fillcolor="rgba(74,222,128,0.30)", name="25th–75th (IQR)",
+        hoverinfo="skip",
+    ))
+    fig.add_trace(go.Scatter(
+        x=x, y=_band(50), mode="lines", line=dict(width=2.5, color=_C_TOTAL),
+        name="Median", hovertemplate="Age %{x}<br>Median %{y:$,.0f}<extra></extra>",
+    ))
+    fig.update_layout(
+        **_CHART_LAYOUT, height=300, margin=dict(l=10, r=10, t=30, b=10),
+        xaxis=dict(title="Age", showgrid=False),
+        yaxis=dict(title=None, tickprefix="$", tickformat="~s", showgrid=True,
+                   gridcolor="#eee", zeroline=False),
+        hovermode="x unified",
+    )
+    return fig
