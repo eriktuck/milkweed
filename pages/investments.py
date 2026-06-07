@@ -5,7 +5,7 @@ import dash
 import dash_ag_grid as dag
 import dash_bootstrap_components as dbc
 import plotly.graph_objects as go
-from dash import dcc, html, callback, Input, Output, State, ALL
+from dash import dcc, html, callback, Input, Output
 from flask import session
 
 from core.services.investments import (
@@ -14,7 +14,6 @@ from core.services.investments import (
     fetch_investment_transactions,
     fetch_latest_holdings,
     reconstruct_portfolio_history,
-    save_investment_account_config,
 )
 
 dash.register_page(__name__, path="/investments")
@@ -39,10 +38,6 @@ _ALLOC_COLORS = [_C_US, _C_INTL, _C_BONDS, _C_CASH]
 _RETIREMENT_TYPES = frozenset({
     "IRA", "Roth IRA", "401k", "Roth 401k", "403b", "457b", "SEP IRA", "SIMPLE IRA",
 })
-_ACCOUNT_TYPES = [
-    "IRA", "Roth IRA", "401k", "Roth 401k", "403b", "457b",
-    "SEP IRA", "SIMPLE IRA", "Brokerage", "HSA", "529", "Other",
-]
 
 
 # ── Sub-component builders ────────────────────────────────────────────────────
@@ -146,35 +141,27 @@ _TXN_PLACEHOLDER = [
      "symbol": "", "shares": 0.0, "share_price": 0.0, "net_amount": 0.0, "account_number": "—"},
 ]
 
-from components.investment_upload import investment_upload  # noqa: E402 (after module-level constants)
-
-# ── Account categorization modal ──────────────────────────────────────────────
-
-_account_modal = dbc.Modal(
-    [
-        dbc.ModalHeader(dbc.ModalTitle("Investment Accounts")),
-        dbc.ModalBody(html.Div(id="account-modal-body")),
-        dbc.ModalFooter([
-            dbc.Button("Cancel", id="account-modal-cancel", color="secondary", className="me-2"),
-            dbc.Button("Save", id="account-modal-save", color="primary"),
-        ]),
-    ],
-    id="account-modal",
-    size="lg",
-    is_open=False,
-)
+# The Vanguard CSV uploaders live on the Settings page ("Upload Data" card);
+# importing the module here keeps its callbacks registered. Account labelling
+# (type/nickname) also happens on Settings — this page is read-only over the
+# uploaded data and refreshes via the global `investments-data-version` store.
+import components.investment_upload  # noqa: E402,F401 (registers upload callbacks)
 
 # ── Page layout ───────────────────────────────────────────────────────────────
 
 layout = html.Div([
-    dcc.Store(id="accounts-for-modal", storage_type="memory"),
-    _account_modal,
     dbc.Container([
 
         # Header
         dbc.Row([
             dbc.Col(html.H1("Investments"), width="auto"),
-            dbc.Col(investment_upload, width=4, className="ms-auto d-flex align-items-center"),
+            dbc.Col(
+                dcc.Link(
+                    [html.I(className="fas fa-file-upload me-1"), "Upload data"],
+                    href="/dash/settings", className="btn btn-outline-primary btn-sm",
+                ),
+                width="auto", className="ms-auto d-flex align-items-center",
+            ),
         ], className="pt-3 pb-2", align="center"),
 
         # Row 1 — BANs (filled by callback)
@@ -471,155 +458,3 @@ def update_transactions(config_data, _version, type_filter, account_filter):
 
     rows = filtered[:500] if filtered else _TXN_PLACEHOLDER
     return rows, type_options, account_options
-
-
-# ── Account modal callbacks ───────────────────────────────────────────────────
-
-@callback(
-    Output("accounts-for-modal", "data", allow_duplicate=True),
-    Input("investments-new-accounts", "data"),
-    prevent_initial_call=True,
-)
-def open_modal_on_new_accounts(new_accounts):
-    if not new_accounts:
-        raise dash.exceptions.PreventUpdate
-    return {"accounts": new_accounts, "mode": "new"}
-
-
-@callback(
-    Output("account-modal-body", "children"),
-    Output("account-modal", "is_open"),
-    Input("accounts-for-modal", "data"),
-    State("config-store", "data"),
-    prevent_initial_call=True,
-)
-def render_modal_body(modal_data, config_data):
-    if not modal_data:
-        raise dash.exceptions.PreventUpdate
-
-    accounts: list[str] = modal_data.get("accounts", [])
-    mode: str = modal_data.get("mode", "new")
-
-    existing_types: dict[str, str] = {}
-    existing_nicknames: dict[str, str] = {}
-    if config_data:
-        try:
-            cfg = json.loads(config_data)
-            uid = session.get("user_id") or ""
-            user_cfg = cfg.get("users", {}).get(uid, {})
-            existing_types = user_cfg.get("investment_accounts") or {}
-            existing_nicknames = user_cfg.get("investment_account_nicknames") or {}
-        except Exception:
-            pass
-
-    type_options = [{"label": t, "value": t} for t in _ACCOUNT_TYPES]
-    header_msg = (
-        "New accounts found. Please assign a type and optional nickname to each."
-        if mode == "new"
-        else "Edit account types and nicknames."
-    )
-
-    rows = [
-        html.P(header_msg, className="text-muted small mb-3"),
-        dbc.Row([
-            dbc.Col(html.Strong("Account"), width=2),
-            dbc.Col(html.Strong("Nickname"), width=4),
-            dbc.Col(html.Strong("Type"), width=4),
-        ], className="mb-2"),
-    ]
-
-    for acct in accounts:
-        rows.append(
-            dbc.Row([
-                dbc.Col(
-                    html.Span(f"****{acct}", className="font-monospace"),
-                    width=2,
-                    className="d-flex align-items-center",
-                ),
-                dbc.Col(
-                    dbc.Input(
-                        id={"type": "acct-nickname", "index": acct},
-                        placeholder="e.g. Work 403b",
-                        value=existing_nicknames.get(acct, ""),
-                        size="sm",
-                    ),
-                    width=4,
-                ),
-                dbc.Col(
-                    dcc.Dropdown(
-                        id={"type": "acct-type", "index": acct},
-                        options=type_options,
-                        value=existing_types.get(acct),
-                        placeholder="Select type…",
-                        clearable=False,
-                    ),
-                    width=4,
-                ),
-            ], className="mb-2 align-items-center"),
-        )
-
-    return rows, True
-
-
-@callback(
-    Output("account-modal", "is_open", allow_duplicate=True),
-    Output("config-store", "data", allow_duplicate=True),
-    Input("account-modal-save", "n_clicks"),
-    State({"type": "acct-type", "index": ALL}, "value"),
-    State({"type": "acct-type", "index": ALL}, "id"),
-    State({"type": "acct-nickname", "index": ALL}, "value"),
-    State("config-store", "data"),
-    prevent_initial_call=True,
-)
-def save_account_config(n_clicks, type_values, type_ids, nickname_values, config_data):
-    if not n_clicks:
-        raise dash.exceptions.PreventUpdate
-
-    uid = session.get("user_id")
-    if not uid:
-        raise dash.exceptions.PreventUpdate
-
-    types: dict[str, str] = {}
-    nicknames: dict[str, str] = {}
-    for id_obj, acct_type, nickname in zip(type_ids, type_values, nickname_values):
-        acct = id_obj["index"]
-        if acct_type:
-            types[acct] = acct_type
-        if nickname:
-            nicknames[acct] = nickname.strip()
-
-    # Merge with existing config to preserve other accounts
-    existing_config: dict = {}
-    if config_data:
-        try:
-            existing_config = json.loads(config_data)
-        except Exception:
-            pass
-
-    existing_types = existing_config.get("users", {}).get(uid, {}).get("investment_accounts") or {}
-    existing_nicknames = existing_config.get("users", {}).get(uid, {}).get("investment_account_nicknames") or {}
-    merged_types = {**existing_types, **types}
-    merged_nicknames = {**existing_nicknames, **nicknames}
-
-    save_investment_account_config(uid, merged_types, merged_nicknames)
-
-    # Update config-store in-memory
-    if "users" not in existing_config:
-        existing_config["users"] = {}
-    if uid not in existing_config["users"]:
-        existing_config["users"][uid] = {}
-    existing_config["users"][uid]["investment_accounts"] = merged_types
-    existing_config["users"][uid]["investment_account_nicknames"] = merged_nicknames
-
-    return False, json.dumps(existing_config)
-
-
-@callback(
-    Output("account-modal", "is_open", allow_duplicate=True),
-    Input("account-modal-cancel", "n_clicks"),
-    prevent_initial_call=True,
-)
-def cancel_account_modal(n_clicks):
-    if not n_clicks:
-        raise dash.exceptions.PreventUpdate
-    return False

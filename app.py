@@ -38,7 +38,11 @@ def protected_layout():
         dcc.Store(id='config-store', storage_type="session", data={"trigger": True}),
         dcc.Store(id='transaction-data-store'),
         dcc.Store(id='transaction-subset-store'),
-        dcc.Store(id='monarch-session-store', storage_type="session")
+        dcc.Store(id='monarch-session-store', storage_type="session"),
+        # Bumped by the Settings portfolio uploader (writer) and consumed by the
+        # Investments page + Settings inv-table (refresh on upload) — mounted
+        # globally so both pages can reach it.
+        dcc.Store(id='investments-data-version', data=0),
     ])
 
 app.layout = protected_layout

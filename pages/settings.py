@@ -7,6 +7,10 @@ from dash import html, dcc, callback, Input, Output, State, ALL, no_update
 from dash.exceptions import PreventUpdate
 from flask import session
 
+from components.investment_upload import (
+    cost_basis_upload,
+    portfolio_upload,
+)
 from core.services.firebase import save_transaction_account_config
 from core.services.investments import (
     fetch_latest_holdings,
@@ -172,7 +176,8 @@ def _inv_table(uid, cfg):
     accts = sorted({h.get("account_number", "") for h in holdings if h.get("account_number")})
     if not accts:
         return html.P(
-            "No investment data uploaded yet. Upload a Vanguard CSV on the Investments page.",
+            "No investment data uploaded yet. Upload a Vanguard portfolio CSV in the "
+            "Upload Data card above.",
             className="text-muted small mb-0",
         )
     user_cfg = cfg.get("users", {}).get(uid, {})
@@ -230,6 +235,43 @@ _delete_modal = dbc.Modal([
 ], id="settings-delete-modal", is_open=False)
 
 
+# ── Upload data card (Vanguard CSV imports) ───────────────────────────────────
+
+_upload_card = dbc.Card([
+    dbc.CardHeader([
+        html.H5("Upload Data", className="mb-1"),
+        html.Div(
+            "Import your Vanguard exports. Each file updates a different part of "
+            "the app — drag & drop or browse below.",
+            className="text-muted small",
+        ),
+    ]),
+    dbc.CardBody(dbc.Row([
+        dbc.Col([
+            html.H6("Portfolio — holdings & transactions", className="mb-1"),
+            html.Div(
+                "From Vanguard's Download center, export “Portfolio holdings & "
+                "transactions” (one CSV covering all accounts). Updates balances, "
+                "holdings, and transaction history on the Investments page, and "
+                "adds any new accounts to the table below for labelling.",
+                className="text-muted small mb-2",
+            ),
+            portfolio_upload,
+        ], md=6),
+        dbc.Col([
+            html.H6("Cost basis — unrealized gains & losses", className="mb-1"),
+            html.Div(
+                "From Vanguard, export Cost basis → “Unrealized gains & losses” "
+                "— one file per account, so upload each. Used to derive the "
+                "taxable-gain % on the Retirement page (taxable accounts only).",
+                className="text-muted small mb-2",
+            ),
+            cost_basis_upload,
+        ], md=6),
+    ], className="g-4")),
+], className="mb-4")
+
+
 # ── layout ───────────────────────────────────────────────────────────────────
 
 layout = html.Div([
@@ -271,14 +313,17 @@ layout = html.Div([
             ], align="center")),
         ], className="mb-4"),
 
+        # ── Upload Data ──
+        _upload_card,
+
         # ── Investment Accounts ──
         dbc.Card([
             dbc.CardHeader([
                 html.H5("Investment Accounts", className="mb-1"),
                 html.Div(
                     "Label each Vanguard account by type and nickname. Drives the retirement "
-                    "vs non-retirement split on the Investments page. New accounts are prompted "
-                    "automatically after an upload.",
+                    "vs non-retirement split on the Investments page. New accounts appear here "
+                    "automatically after a portfolio upload above.",
                     className="text-muted small",
                 ),
             ]),
@@ -450,8 +495,11 @@ def save_txn_accounts(n_clicks, owner_vals, owner_ids, inc_vals, inc_ids,
 @callback(
     Output("settings-inv-table", "children"),
     Input("config-store", "data"),
+    Input("investments-data-version", "data"),
 )
-def render_inv_table(config_data):
+def render_inv_table(config_data, _data_version):
+    # `investments-data-version` bumps after a portfolio upload so newly-added
+    # accounts appear here for labelling without a page reload.
     uid = session.get("user_id")
     if not uid:
         raise PreventUpdate

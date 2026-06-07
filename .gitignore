@@ -61,6 +61,9 @@ firestore-debug.log
 firestore-emulator-data/
 emulator-data/
 
+# Docs (personal analyses)
+docs/
+
 # Graphify
 graphify-out
 

@@ -65,6 +65,18 @@ class InvestmentSnapshot(BaseModel):
     holdings: list[HoldingRecord]
 
 
+class CostBasisRecord(BaseModel):
+    """Per-account roll-up of a Vanguard *cost-basis* (unrealized gain/loss)
+    export — distinct from the portfolio CSV. One record per account; lots are
+    summed at parse time since the taxable-gain fraction only needs aggregate
+    market value and cost.
+    """
+    account_number: str       # last 4 digits, matching HoldingRecord
+    market_value: float
+    cost: float
+    gain: float               # market_value − cost
+
+
 # ─────────────────────────────────────────────
 # CSV Parser
 # ─────────────────────────────────────────────
@@ -179,6 +191,89 @@ def parse_vanguard_csv(
         ))
 
     return holdings, transactions
+
+
+# ── Cost-basis (unrealized gain/loss) export ─────────────────────────────────────
+#
+# A separate Vanguard download from the portfolio CSV, exported **per account**
+# ("Cost basis" → "Unrealized gains & losses" → Download). One row per tax lot.
+# The header carries dynamic timestamps and a comma *inside* a quoted field name
+# ("Market value as of 06/05/2026 04:00 PM, ET"), so it cannot be matched as a
+# raw string like the portfolio headers — it must be CSV-parsed and located by
+# field prefix. The first two lines are disclaimer text; the header row is the
+# first whose leading cell is "Account".
+
+_COST_BASIS_COST_COL = "Total cost"
+_COST_BASIS_MV_PREFIX = "Market value"   # full header includes an export timestamp
+
+
+def _is_cost_basis_header(row: list[str]) -> bool:
+    return bool(row) and row[0].strip() == "Account" and any(
+        c.strip() == _COST_BASIS_COST_COL for c in row
+    )
+
+
+def _is_portfolio_header(row: list[str]) -> bool:
+    return bool(row) and row[0].strip() == "Account Number" and any(
+        c.strip() == "Total Value" for c in row
+    )
+
+
+def detect_vanguard_csv_type(content: str) -> str:
+    """Classify a Vanguard export as 'portfolio' | 'cost_basis' | 'unknown'.
+
+    Lets a single upload affordance accept either the portfolio CSV (holdings +
+    transactions) or a per-account cost-basis CSV and route accordingly.
+    """
+    for row in csv.reader(content.splitlines()):
+        if _is_cost_basis_header(row):
+            return "cost_basis"
+        if _is_portfolio_header(row):
+            return "portfolio"
+    return "unknown"
+
+
+def parse_vanguard_cost_basis_csv(content: str) -> list[CostBasisRecord]:
+    """Parse a Vanguard cost-basis CSV, rolled up to one record per account.
+
+    Sums each account's lots into total market value and total cost (gain is the
+    difference). Returns one CostBasisRecord per account found.
+    Raises ValueError if the cost-basis header is not present.
+    """
+    rows = list(csv.reader(content.splitlines()))
+
+    header_idx = next((i for i, r in enumerate(rows) if _is_cost_basis_header(r)), None)
+    if header_idx is None:
+        raise ValueError(
+            "Vanguard cost-basis CSV is missing its header row. Ensure you are "
+            "uploading an unmodified 'Unrealized gains & losses' export."
+        )
+
+    header = [c.strip() for c in rows[header_idx]]
+    acct_i = header.index("Account")
+    cost_i = header.index(_COST_BASIS_COST_COL)
+    mv_i = next(i for i, h in enumerate(header) if h.startswith(_COST_BASIS_MV_PREFIX))
+
+    agg: dict[str, dict[str, float]] = defaultdict(lambda: {"market_value": 0.0, "cost": 0.0})
+    for row in rows[header_idx + 1:]:
+        if len(row) <= max(acct_i, cost_i, mv_i):
+            continue
+        acct = (row[acct_i] or "").strip()
+        if not acct:
+            continue
+        acct = acct[-4:]
+        agg[acct]["market_value"] += _parse_float(row[mv_i])
+        agg[acct]["cost"] += _parse_float(row[cost_i])
+
+    return [
+        CostBasisRecord(
+            account_number=acct,
+            market_value=vals["market_value"],
+            cost=vals["cost"],
+            gain=vals["market_value"] - vals["cost"],
+        )
+        for acct, vals in agg.items()
+    ]
 
 
 def _transaction_doc_id(txn: TransactionRecord) -> str:
@@ -301,6 +396,69 @@ def process_and_upload_vanguard_csv(
     return len(holdings), len(transactions)
 
 
+def upsert_cost_basis(
+    uid: str,
+    snapshot_date: str,
+    records: list[CostBasisRecord],
+) -> None:
+    """Merge per-account cost-basis records into the single cost_basis document.
+
+    Cost-basis reports are exported one account at a time, so each upload merges
+    its accounts into users/{uid}/investments/cost_basis rather than overwriting
+    — uploading account A then account B accumulates both. Re-uploading an
+    account overwrites just that account's entry with the fresh figures.
+    """
+    ref = (
+        db.collection("users")
+          .document(uid)
+          .collection("investments")
+          .document("cost_basis")
+    )
+    existing = ref.get()
+    accounts: dict = existing.to_dict().get("accounts", {}) if existing.exists else {}
+    for rec in records:
+        accounts[rec.account_number] = {
+            "market_value": rec.market_value,
+            "cost": rec.cost,
+            "gain": rec.gain,
+        }
+    ref.set({
+        "snapshot_date": snapshot_date,
+        "uploaded_at": datetime.utcnow().isoformat(),
+        "accounts": accounts,
+    })
+
+
+def fetch_cost_basis(uid: str) -> dict:
+    """Return the {account: {market_value, cost, gain}} map, or {}."""
+    ref = (
+        db.collection("users")
+          .document(uid)
+          .collection("investments")
+          .document("cost_basis")
+    )
+    doc = ref.get()
+    return doc.to_dict().get("accounts", {}) if doc.exists else {}
+
+
+def process_and_upload_cost_basis_csv(
+    uid: str,
+    content: str,
+    snapshot_date: Optional[str] = None,
+) -> int:
+    """Parse a Vanguard cost-basis CSV and merge it into Firestore.
+
+    snapshot_date defaults to today's date. Returns the number of accounts in
+    this upload.
+    """
+    if snapshot_date is None:
+        snapshot_date = date.today().isoformat()
+
+    records = parse_vanguard_cost_basis_csv(content)
+    upsert_cost_basis(uid, snapshot_date, records)
+    return len(records)
+
+
 def save_investment_account_config(
     uid: str,
     types: dict[str, str],
@@ -317,9 +475,10 @@ def save_investment_account_config(
 def delete_investment_data(uid: str) -> tuple[int, int]:
     """Delete all investment data for uid from Firestore.
 
-    Removes the holdings snapshot and investment_transactions subcollections,
-    and clears the investment_accounts / investment_account_nicknames config
-    fields (their keys are full account numbers).
+    Removes the investments subcollection (holdings + cost_basis snapshots) and
+    the investment_transactions subcollection, and clears the
+    investment_accounts / investment_account_nicknames config fields (their keys
+    are full account numbers).
 
     Returns (n_holdings_docs, n_transaction_docs) deleted.
     """

@@ -10,6 +10,57 @@ from core.services.firebase import (
 
 _DATE_PAT = re.compile(r'^\d{4}-\d{2}-\d{2}$')
 
+
+class RetirementConfig(BaseModel):
+    """Retirement-page planning assumptions, persisted under UserConfig.retirement.
+
+    Added for the Retirement page (spec-retirement.md, Phase 2). Every field is
+    optional with a code-side default in core/services/retirement.py, so a config
+    that predates this block behaves as if the user accepted all defaults — no
+    Firestore migration is required for read-compatibility (mirrors how
+    transaction_account_settings was introduced).
+
+    Field names reuse the existing core/models/individual.py vocabulary
+    (`birth_year`, `retirement_age`, `death_age`, `claim_age`) so the v1 light
+    service and the future RetirementScenario engine share one set of inputs.
+
+    `birth_year` is the one value that cannot be derived or defaulted (RMD start
+    age depends on it — 73 vs 75); the page captures it on first use and it stays
+    None until then.
+    """
+    # Ages / dates -----------------------------------------------------------
+    birth_year: int | None = None          # e.g. 1985; drives RMD start age (Phase 6)
+    retirement_age: int | None = None      # default 65 (see service DEFAULTS)
+    death_age: int | None = None           # planning horizon; default 90
+    claim_age: int | None = None           # Social Security claim age; default 67 (FRA)
+
+    # Spending-phase boundaries (ages). go-go = [retirement_age, slow_go_age),
+    # slow-go = [slow_go_age, no_go_age), no-go = [no_go_age, death_age].
+    slow_go_age: int | None = None         # default 75
+    no_go_age: int | None = None           # default 85
+
+    # Economic assumptions ---------------------------------------------------
+    # No general inflation field by design: the model is in real (inflation-
+    # adjusted) dollars, so `real_return` already nets out inflation and a general
+    # inflation knob would double-count. Any future need is purpose-specific
+    # (nominal tax-bracket indexing / healthcare excess inflation) and gets its
+    # own dedicated field then.
+    real_return: float | None = None       # expected real return; default 0.05
+    withdrawal_rate: float | None = None    # SWR sanity-check rate; default 0.04
+
+    # Per-csp-key phase multiplier overrides. Shape:
+    #   {csp_key: {"slow_go": 0.9, "no_go": 0.7}}  (go-go is always 1.0)
+    # Absent keys fall back to PHASE_FACTORS in the service (seeded from research).
+    # This is the user-editable crosswalk; the Expenses pane (Phase 5) writes it.
+    phase_factors: Dict[str, Dict[str, float]] | None = None
+
+    # Current balances by tax bucket (taxable / trad / roth). Optional override;
+    # when None the service derives buckets from the holdings snapshot +
+    # investment_accounts (see retirement.balances_by_tax_bucket). Used by the
+    # full tax-aware engine in Phase 6.
+    account_balances: Dict[str, float] | None = None
+
+
 class UserConfig(BaseModel):
     accounts: List[str]
     cat_names: Dict[str, str]
@@ -38,6 +89,9 @@ class UserConfig(BaseModel):
     # them. Absent key → included (backward compatible with pre-control-plane
     # configs that have no settings map).
     transaction_account_settings: Dict[str, dict] | None = None
+    # Retirement-page planning assumptions (spec-retirement.md, Phase 2).
+    # Absent → service defaults apply; no migration needed (see RetirementConfig).
+    retirement: RetirementConfig | None = None
 
 
 class HouseholdConfig(UserConfig):
