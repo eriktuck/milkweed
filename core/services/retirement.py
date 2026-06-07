@@ -200,6 +200,19 @@ AIME_YEARS: int = 35                                  # SS averages the top 35 y
 MEDICARE_PART_B_MONTHLY_2025: float = 185.00
 MEDICARE_PART_B_MONTHLY_2026: float = 202.90
 
+# Healthcare glide defaults (annual, real $, per individual) — research §"Healthcare".
+# These are *total* annual healthcare costs for each life stage, editable on the
+# page. Medicare age 65 splits the pre-65 ACA bridge from Medicare + out-of-pocket.
+MEDICARE_AGE: int = 65
+HC_OOP_ANNUAL: float = 4_000.0      # Medigap / Part D / out-of-pocket on top of Part B
+HC_ACA_ANNUAL: float = 11_000.0     # pre-65 ACA-bridge premium (unsubsidized, 60-something)
+# Long-term-care spike (Genworth 2024 medians ~$71k assisted living → ~$128k nursing
+# home). OFF by default — modelled as an explicit editable late-life event, not baked
+# into routine spend (research recommendation).
+LTC_DEFAULT_ANNUAL: float = 0.0
+LTC_DEFAULT_START_AGE: int = 85
+LTC_DEFAULT_YEARS: int = 3
+
 # Planning default: share of a taxable-account withdrawal that is realized
 # long-term gain (taxed at LTCG); the rest is return of basis (tax-free). We do
 # not track per-lot cost basis in v1, so this is an editable assumption.
@@ -869,32 +882,44 @@ def project_retirement_taxaware(
 
 
 def healthcare_costs_by_age(
-    retirement_cfg: dict,
     retirement_age: int,
     death_age: int,
+    *,
+    oop_annual: float = HC_OOP_ANNUAL,
+    aca_annual: float = HC_ACA_ANNUAL,
+    medicare_annual: float | None = None,
+    medicare_age: int = MEDICARE_AGE,
+    ltc_annual: float = LTC_DEFAULT_ANNUAL,
+    ltc_start_age: int = LTC_DEFAULT_START_AGE,
+    ltc_years: int = LTC_DEFAULT_YEARS,
 ) -> pd.Series:
-    """Annual healthcare cost by age via the dedicated HealthCare model.  (Phase 7)
+    """Annual healthcare cost by age (real $).  (Phase 7 — pure, age-indexed)
 
-    Replaces the flat csp-key healthcare spend (excluded upstream via
-    HEALTHCARE_CSP_KEYS) with the research-backed ACA-bridge → Medicare/Part-B →
-    late-life/LTC glide. Wraps core.models.healthcare.HealthCare (fixing the
-    age-vs-year bug noted in inventory.md §6) and exposes an editable late-life
-    LTC spike. Implemented in Phase 7.
+    Reproduces the working → ACA-bridge → Medicare → late-life glide of
+    core.models.healthcare, but **indexed on age** (fixing that model's
+    age-vs-year bug, inventory.md §6) and grounded in the research $:
+
+      * before `medicare_age` (early retirement): ACA-bridge premium + baseline OOP
+      * `medicare_age`+: Medicare Part B + baseline OOP
+      * an editable **LTC spike** of `ltc_annual` for `ltc_years` from `ltc_start_age`
+
+    This is the single source of the late-life "smile" upturn: the `medical` /
+    `health_insurance` csp keys are excluded from the generic spend pool upstream
+    (HEALTHCARE_CSP_KEYS), so adding this series is additive, not double-counted.
+    `medicare_annual` defaults to the standard Part B premium (×12). Returns a
+    Series indexed by age (retirement_age … death_age).
     """
-    raise NotImplementedError("healthcare_costs_by_age is implemented in Phase 7")
+    medicare_annual = (MEDICARE_PART_B_MONTHLY_2025 * 12.0
+                       if medicare_annual is None else float(medicare_annual))
+    ltc_start = int(ltc_start_age)
+    ltc_end = ltc_start + max(int(ltc_years), 0)
+    spike = float(ltc_annual or 0.0)
 
-
-def healthcare_costs_by_age(
-    retirement_cfg: dict,
-    retirement_age: int,
-    death_age: int,
-) -> pd.Series:
-    """Annual healthcare cost by age via the dedicated HealthCare model.  (Phase 7)
-
-    Replaces the flat csp-key healthcare spend (excluded upstream via
-    HEALTHCARE_CSP_KEYS) with the research-backed ACA-bridge → Medicare/Part-B →
-    late-life/LTC glide. Wraps core.models.healthcare.HealthCare (fixing the
-    age-vs-year bug noted in inventory.md §6) and exposes an editable late-life
-    LTC spike. Implemented in Phase 7.
-    """
-    raise NotImplementedError("healthcare_costs_by_age is implemented in Phase 7")
+    out: dict[int, float] = {}
+    for age in range(int(retirement_age), int(death_age) + 1):
+        cost = float(oop_annual) + (medicare_annual if age >= int(medicare_age)
+                                    else float(aca_annual))
+        if spike > 0 and ltc_start <= age < ltc_end:
+            cost += spike
+        out[age] = cost
+    return pd.Series(out)

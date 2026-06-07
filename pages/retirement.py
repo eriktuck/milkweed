@@ -21,20 +21,33 @@ import json
 
 import dash
 import dash_bootstrap_components as dbc
+import numpy as np
 import plotly.graph_objects as go
 from dash import Input, Output, State, callback, dash_table, dcc, html
 from flask import session
 
 import core.utils.functions as functions
 from core.services.forecast import default_monthly_contribution
+from core.services.investments import fetch_latest_holdings
+from core.services.returns import (
+    bootstrap_projection,
+    build_returns_payload,
+    percentile_bands,
+)
 from core.services.retirement import (
     DEFAULT_PHASE_FACTOR,
+    HC_ACA_ANNUAL,
+    HC_OOP_ANNUAL,
+    LTC_DEFAULT_START_AGE,
+    LTC_DEFAULT_YEARS,
+    MEDICARE_PART_B_MONTHLY_2025,
     PHASES,
     TAXABLE_GAIN_FRACTION,
     annual_spend_by_phase,
     balances_by_tax_bucket,
     default_contribution_allocation,
     estimate_annual_pia_from_income,
+    healthcare_costs_by_age,
     nest_egg_goal,
     phase_for_age,
     project_balances_to_retirement,
@@ -47,6 +60,10 @@ from core.services.retirement import (
     social_security_income,
     taxable_gain_fraction,
 )
+
+# Healthcare input defaults (totals per life stage = stage premium + baseline OOP).
+_HC_ACA_DEFAULT = int(HC_ACA_ANNUAL + HC_OOP_ANNUAL)                       # pre-65 total
+_HC_MEDICARE_DEFAULT = int(MEDICARE_PART_B_MONTHLY_2025 * 12 + HC_OOP_ANNUAL)  # 65+ total
 
 dash.register_page(__name__, path="/retirement")
 
@@ -127,18 +144,6 @@ _input_bar = dbc.Card(dbc.CardBody(dbc.Row([
         html.Small("inflation-adjusted", className="text-muted"),
     ], width="auto"),
 ], className="g-3 align-items-end")), className="mb-3")
-
-
-# ── Placeholder section (Expenses / Income / Risk filled in Phases 5–7) ──────────
-
-def _placeholder(title: str, phase: str, body: str) -> dbc.Card:
-    return dbc.Card(dbc.CardBody([
-        html.Div([
-            html.H4(title, className="d-inline mb-0"),
-            dbc.Badge(phase, color="secondary", className="ms-2 align-middle"),
-        ], className="mb-2"),
-        html.P(body, className="text-muted small mb-0"),
-    ]), className="mb-3", style={"borderStyle": "dashed"})
 
 
 # ── Expenses calculator (Phase 5) ────────────────────────────────────────────────
@@ -337,8 +342,57 @@ _income_section = dbc.Card(dbc.CardBody([
         dcc.Graph(id="ret-cashflow-chart", config={"displayModeBar": False}),
         html.P("Social Security is the guaranteed floor; the portfolio fills the gap. "
                "Forced RMDs can spike taxable draws late (the excess is reinvested, "
-               "not spent). Healthcare's late-life rise is layered in the next phase.",
+               "not spent). Healthcare's late-life rise is layered into the spend below.",
                className="text-muted small mt-2 mb-0"),
+    ]), color="light"),
+]), className="mb-3")
+
+
+# ── Risk & late-life (Phase 7) ────────────────────────────────────────────────────
+
+_risk_section = dbc.Card(dbc.CardBody([
+    html.Div([
+        html.H4("Risk & late-life — will it actually last?", className="d-inline mb-0"),
+        dbc.Badge("sequence-of-returns", color="info", className="ms-2 align-middle"),
+    ], className="mb-1"),
+    html.P([
+        "Two things a single average return hides: the late-life ", html.B("healthcare"),
+        " rise (the upturn that completes the spending smile) and ", html.B("sequence risk"),
+        " — a bad run of early-retirement returns can sink a plan that an average return "
+        "says is fine. The fan below bootstraps your holdings' real annual returns.",
+    ], className="text-muted small mb-3"),
+
+    # Healthcare & LTC inputs (drive the projection above + below).
+    html.P("Healthcare & long-term care", className="small fw-bold mb-2"),
+    dbc.Row([
+        dbc.Col([dbc.Label("ACA bridge (pre-65), $/yr", className="small text-muted mb-1"),
+                 _money_input("ret-hc-aca", value=_HC_ACA_DEFAULT, min=0, step=500)], lg=3),
+        dbc.Col([dbc.Label("Medicare + OOP (65+), $/yr", className="small text-muted mb-1"),
+                 _money_input("ret-hc-medicare", value=_HC_MEDICARE_DEFAULT, min=0, step=500)], lg=3),
+        dbc.Col([dbc.Label("LTC spike, $/yr", className="small text-muted mb-1"),
+                 _money_input("ret-hc-ltc", value=0, min=0, step=5000)], lg=2),
+        dbc.Col([dbc.Label("LTC start age", className="small text-muted mb-1"),
+                 _num_input("ret-hc-ltc-age", LTC_DEFAULT_START_AGE, min=65, max=105, step=1)], lg=2),
+        dbc.Col([dbc.Label("LTC years", className="small text-muted mb-1"),
+                 _num_input("ret-hc-ltc-years", LTC_DEFAULT_YEARS, min=0, max=15, step=1)], lg=2),
+    ], className="g-2 mb-2"),
+    html.Small("Defaults are research medians (Part B + out-of-pocket; ACA unsubsidized). "
+               "The LTC spike is off by default — set an annual cost to model a late-life "
+               "care event (Genworth medians ~$71k assisted living → ~$128k nursing home).",
+               className="text-muted d-block mb-3"),
+
+    dbc.Row([
+        dbc.Col(id="ret-risk-ban-success", lg=4),
+        dbc.Col(id="ret-risk-ban-median", lg=4),
+        dbc.Col(id="ret-risk-ban-p10", lg=4),
+    ], className="g-3 mb-3"),
+
+    dbc.Card(dbc.CardBody([
+        html.P("Range of outcomes — 1,000 bootstrap paths over your drawdown",
+               className="text-muted small mb-2"),
+        dcc.Loading(dcc.Graph(id="ret-risk-fan", config={"displayModeBar": False}),
+                    type="circle"),
+        html.P(id="ret-risk-caption", className="text-muted small mt-2 mb-0"),
     ]), color="light"),
 ]), className="mb-3")
 
@@ -346,6 +400,10 @@ _income_section = dbc.Card(dbc.CardBody([
 # ── Page layout ─────────────────────────────────────────────────────────────────
 
 layout = html.Div([
+    # Holdings' historical real-return pool (for the risk fan) + the deterministic
+    # drawdown stream (so the fan recomputes without redoing the projection).
+    dcc.Store(id="ret-returns-store", storage_type="memory"),
+    dcc.Store(id="ret-projection-store", storage_type="memory"),
     dbc.Container([
         dbc.Row([
             dbc.Col(html.H1("Retirement"), width="auto"),
@@ -386,11 +444,8 @@ layout = html.Div([
         _expenses_section,
         # ── Income calculator (Phase 6) ──────────────────────────────────────────
         _income_section,
-        _placeholder(
-            "Risk & late-life", "Phase 7",
-            "Sequence-of-returns fan chart and probability of success, the HealthCare "
-            "glide (Medicare/IRMAA), and an editable long-term-care spike.",
-        ),
+        # ── Risk & late-life (Phase 7) ───────────────────────────────────────────
+        _risk_section,
     ], fluid=False),
 ])
 
@@ -701,6 +756,7 @@ def estimate_ss(gross_income, employment_type, career_years):
     Output("ret-expenses-note", "children"),
     Output("ret-cashflow-chart", "figure"),
     Output("ret-income-summary", "children"),
+    Output("ret-projection-store", "data"),
     Input("ret-retirement-age", "value"),
     Input("ret-death-age", "value"),
     Input("ret-slow-go-age", "value"),
@@ -714,12 +770,18 @@ def estimate_ss(gross_income, employment_type, career_years):
     Input("ret-bal-roth", "value"),
     Input("ret-ss-pia", "value"),
     Input("ret-gain-frac", "value"),
+    Input("ret-hc-aca", "value"),
+    Input("ret-hc-medicare", "value"),
+    Input("ret-hc-ltc", "value"),
+    Input("ret-hc-ltc-age", "value"),
+    Input("ret-hc-ltc-years", "value"),
     Input("config-store", "data"),
     Input("use-case", "value"),
 )
 def recompute(retirement_age, death_age, slow_go_age, no_go_age, real_return,
               claim_age, birth_year, expenses_rows, bal_taxable, bal_trad, bal_roth,
-              ss_pia, gain_frac, config_data, use_case):
+              ss_pia, gain_frac, hc_aca, hc_medicare, hc_ltc, hc_ltc_age, hc_ltc_years,
+              config_data, use_case):
     uid = _selected_uid(use_case)
     user_cfg = _user_cfg(config_data, uid)
     if user_cfg is None:
@@ -730,7 +792,7 @@ def recompute(retirement_age, death_age, slow_go_age, no_go_age, real_return,
         blank = _ban_card("—", "—", "")
         empty = _empty_figure(msg)
         return (blank, blank, blank, blank, empty, "", _empty_figure(""), "", "",
-                _empty_figure(""), "")
+                _empty_figure(""), "", None)
 
     retirement_age = int(retirement_age)
     death_age = int(death_age)
@@ -745,10 +807,20 @@ def recompute(retirement_age, death_age, slow_go_age, no_go_age, real_return,
     # Income: Social Security from the PIA estimate × claim-age factor.
     ss = social_security_income(_num(ss_pia), claim_age, retirement_age, death_age)
 
-    # Backward nest-egg goal: PV of the net (spend − SS) stream (pre-tax, the
-    # planning target). Independent of starting balances.
+    # Healthcare glide (Phase 7): ACA bridge → Medicare → editable LTC spike. The
+    # totals already fold in out-of-pocket, so oop_annual=0 here. Healthcare csp
+    # keys are excluded from `spend`, so this is additive (the smile's upturn).
+    hc = healthcare_costs_by_age(
+        retirement_age, death_age, oop_annual=0.0,
+        aca_annual=_num(hc_aca), medicare_annual=_num(hc_medicare),
+        ltc_annual=_num(hc_ltc), ltc_start_age=int(hc_ltc_age or 85),
+        ltc_years=int(hc_ltc_years or 0))
+
+    # Backward nest-egg goal: PV of the net (spend + healthcare − SS) stream
+    # (pre-tax, the planning target). Independent of starting balances.
     stream = project_retirement(0.0, retirement_age, death_age, spend,
-                                slow_go_age, no_go_age, r, income_by_age=ss)
+                                slow_go_age, no_go_age, r, income_by_age=ss,
+                                healthcare_by_age=hc)
     goal = nest_egg_goal(stream, r)
 
     # Drawdown line: if the user has actual balances, project them through the
@@ -762,11 +834,13 @@ def recompute(retirement_age, death_age, slow_go_age, no_go_age, real_return,
     if start_total > 0:
         df = project_retirement_taxaware(
             balances, retirement_age, death_age, spend, slow_go_age, no_go_age, r,
-            ss_by_age=ss, rmd_start=rmd_start, taxable_gain_fraction=gf)
+            ss_by_age=ss, healthcare_by_age=hc, rmd_start=rmd_start,
+            taxable_gain_fraction=gf)
         tax_aware = True
     else:
         df = project_retirement(goal, retirement_age, death_age, spend,
-                                slow_go_age, no_go_age, r, income_by_age=ss)
+                                slow_go_age, no_go_age, r, income_by_age=ss,
+                                healthcare_by_age=hc)
         tax_aware = False
     s = retirement_summary(df, r)
 
@@ -824,7 +898,7 @@ def recompute(retirement_age, death_age, slow_go_age, no_go_age, real_return,
         )
 
     # ── Expenses-section outputs ─────────────────────────────────────────────────
-    glide = _glide_figure(spend, retirement_age, slow_go_age, no_go_age, death_age)
+    glide = _glide_figure(spend, hc, retirement_age, slow_go_age, no_go_age, death_age)
     totals = (
         f"Annual: go-go {_money(spend['go_go'])} · slow-go {_money(spend['slow_go'])} "
         f"· no-go {_money(spend['no_go'])}"
@@ -832,8 +906,8 @@ def recompute(retirement_age, death_age, slow_go_age, no_go_age, real_return,
     n_rows = len(expenses_rows or [])
     note = (
         f"{n_rows} living-expense categories from your CSP plan. The glide steps "
-        "down at each phase boundary; healthcare's late-life rise (added in a "
-        "later phase) is what turns this decline into the full spending smile."
+        "down at each phase boundary; the rising healthcare line (set in Risk & "
+        "late-life below) turns this decline into the full spending smile."
     ) if n_rows else "No CSP plan found — add one on the CSP page to seed these expenses."
 
     # ── Income-section outputs ────────────────────────────────────────────────────
@@ -842,8 +916,18 @@ def recompute(retirement_age, death_age, slow_go_age, no_go_age, real_return,
     income_summary = _income_summary_card(df, ss, claim_age, rmd_start, tax_aware,
                                           start_total)
 
+    # ── Risk-section input: the deterministic drawdown stream for the fan ─────────
+    proj_store = {
+        "ages": [int(a) for a in df.index.tolist()],
+        "withdrawals": [float(w) for w in df["withdrawal"].tolist()],
+        "start_value": float(df["total"].iloc[0]),
+        "retirement_age": retirement_age,
+        "death_age": death_age,
+        "tax_aware": tax_aware,
+    }
+
     return (ban_goal, ban_avg, ban_first, ban_remaining, fig, insight,
-            glide, totals, note, cashflow, income_summary)
+            glide, totals, note, cashflow, income_summary, proj_store)
 
 
 # ── Figure builders ──────────────────────────────────────────────────────────────
@@ -914,13 +998,16 @@ def _drawdown_figure(df, retirement_age, slow_go_age, no_go_age, death_age, goal
     return fig
 
 
-def _glide_figure(spend, retirement_age, slow_go_age, no_go_age, death_age):
+def _glide_figure(spend, hc, retirement_age, slow_go_age, no_go_age, death_age):
     """Annual living-spend step-down across the three phases, vs. a flat-spend
-    reference (what assuming constant go-go spend would cost). Spend values are
-    positive plan magnitudes — no abs()/negation involved."""
+    reference, plus living-spend + healthcare (the rising "smile"). Spend values
+    are positive plan magnitudes — no abs()/negation involved. `hc` is the
+    healthcare-by-age Series."""
     ages = list(range(retirement_age, death_age + 1))
     y = [spend.get(phase_for_age(a, slow_go_age, no_go_age), 0.0) for a in ages]
     flat = [spend.get("go_go", 0.0)] * len(ages)
+    health = {int(k): float(v) for k, v in (hc.to_dict() if hc is not None else {}).items()}
+    smile = [yv + health.get(a, 0.0) for a, yv in zip(ages, y)]
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(
@@ -929,10 +1016,15 @@ def _glide_figure(spend, retirement_age, slow_go_age, no_go_age, death_age):
         hovertemplate="Age %{x}<br>flat %{y:$,.0f}<extra></extra>",
     ))
     fig.add_trace(go.Scatter(
-        x=ages, y=y, mode="lines", name="Phased spend",
+        x=ages, y=y, mode="lines", name="Living spend",
         line=dict(width=2.4, color=_C_GOGO, shape="hv"), fill="tozeroy",
         fillcolor="rgba(127,179,245,0.15)",
         hovertemplate="Age %{x}<br>spend %{y:$,.0f}<extra></extra>",
+    ))
+    fig.add_trace(go.Scatter(
+        x=ages, y=smile, mode="lines", name="+ healthcare",
+        line=dict(width=2.0, color=_C_NOGO, shape="hv"),
+        hovertemplate="Age %{x}<br>spend + healthcare %{y:$,.0f}<extra></extra>",
     ))
     fig.add_vline(x=slow_go_age, line_width=1, line_dash="dot", line_color="#cbd5e1")
     fig.add_vline(x=no_go_age, line_width=1, line_dash="dot", line_color="#cbd5e1")
@@ -941,7 +1033,7 @@ def _glide_figure(spend, retirement_age, slow_go_age, no_go_age, death_age):
         xaxis=dict(title="Age", showgrid=False),
         yaxis=dict(title=None, tickprefix="$", tickformat="~s", showgrid=True,
                    gridcolor="#eee", zeroline=False, rangemode="tozero"),
-        hovermode="x unified", showlegend=False,
+        hovermode="x unified", showlegend=True,
     )
     return fig
 
@@ -1018,3 +1110,117 @@ def _income_summary_card(df, ss, claim_age, rmd_start, tax_aware, start_total):
         _row("First-year tax", f"{_money(first['tax'])} ({eff:.0%})", "text-warning"),
         _row("Lifetime taxes", _money(lifetime_tax), "text-warning"),
     ]), className="h-100")
+
+
+# ── Risk & late-life callbacks (Phase 7) ─────────────────────────────────────────
+
+@callback(
+    Output("ret-returns-store", "data"),
+    Input("config-store", "data"),
+    Input("use-case", "value"),
+)
+def compute_ret_returns(config_data, use_case):
+    """Historical real-return pool for the risk fan — the only network-bound read
+    (cached yfinance/cpi via build_returns_payload), kept OFF the recompute hot
+    path in its own store, mirroring Forecast's fc-returns-store."""
+    uid = _selected_uid(use_case)
+    if not uid:
+        raise dash.exceptions.PreventUpdate
+    return build_returns_payload(fetch_latest_holdings(uid))
+
+
+def _risk_fan_figure(ages, bands, start_value):
+    """Percentile fan over the drawdown years (mirrors Forecast's fan styling)."""
+    x = [ages[0]] + ages
+
+    def _band(p):
+        return [start_value] + [max(v, 0.0) for v in bands.get(p, [])]
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=x, y=_band(90), mode="lines", line=dict(width=0),
+                             showlegend=False, hoverinfo="skip"))
+    fig.add_trace(go.Scatter(x=x, y=_band(10), mode="lines", line=dict(width=0),
+                             fill="tonexty", fillcolor="rgba(91,126,201,0.15)",
+                             name="10th–90th pct", hoverinfo="skip"))
+    fig.add_trace(go.Scatter(x=x, y=_band(75), mode="lines", line=dict(width=0),
+                             showlegend=False, hoverinfo="skip"))
+    fig.add_trace(go.Scatter(x=x, y=_band(25), mode="lines", line=dict(width=0),
+                             fill="tonexty", fillcolor="rgba(74,222,128,0.30)",
+                             name="25th–75th (IQR)", hoverinfo="skip"))
+    fig.add_trace(go.Scatter(x=x, y=_band(50), mode="lines",
+                             line=dict(width=2.5, color="#444"), name="Median",
+                             hovertemplate="Age %{x}<br>Median %{y:$,.0f}<extra></extra>"))
+    fig.update_layout(
+        **_CHART_LAYOUT, height=320, margin=dict(l=10, r=10, t=30, b=10),
+        xaxis=dict(title="Age", showgrid=False),
+        yaxis=dict(title=None, tickprefix="$", tickformat="~s", showgrid=True,
+                   gridcolor="#eee", zeroline=True, zerolinecolor="#ddd",
+                   rangemode="tozero"),
+        hovermode="x unified",
+    )
+    return fig
+
+
+@callback(
+    Output("ret-risk-fan", "figure"),
+    Output("ret-risk-caption", "children"),
+    Output("ret-risk-ban-success", "children"),
+    Output("ret-risk-ban-median", "children"),
+    Output("ret-risk-ban-p10", "children"),
+    Input("ret-projection-store", "data"),
+    Input("ret-returns-store", "data"),
+)
+def render_risk_fan(proj, returns):
+    """Bootstrap the drawdown against historical real returns to show sequence
+    risk. Reuses the deterministic withdrawal stream (negative contributions) and
+    returns.bootstrap_projection / percentile_bands."""
+    blank = _ban_card("—", "—", "")
+    if not proj or not proj.get("ages"):
+        return _empty_figure(""), "", blank, blank, blank
+
+    pool = (returns or {}).get("real_return_pool") or []
+    if not pool:
+        msg = ((returns or {}).get("message")
+               or "Upload a Vanguard portfolio CSV (Settings) to bootstrap your returns.")
+        return _empty_figure(msg), msg, blank, blank, blank
+
+    ages = proj["ages"]
+    start_value = float(proj["start_value"])
+    horizon = len(ages)
+    # Withdrawals are positive magnitudes; they enter the bootstrap as negative
+    # contributions each year (start_value already entering retirement).
+    contribs = [-float(w) for w in proj["withdrawals"]]
+    sims = bootstrap_projection(pool, start_value, contribs, horizon)  # (horizon, n_sims)
+    if sims.size == 0:
+        return _empty_figure(""), "", blank, blank, blank
+
+    bands = percentile_bands(sims)
+    fig = _risk_fan_figure(ages, bands, start_value)
+
+    n_sims = sims.shape[1]
+    success = float((sims.min(axis=0) >= 0).mean())   # never depletes
+    final = sims[-1]
+    median_final = float(np.median(final))
+    p10_final = float(np.percentile(final, 10))
+
+    success_cls = ("text-success" if success >= 0.85
+                   else "text-warning" if success >= 0.70 else "text-danger")
+    ban_success = _ban_card(
+        "Probability of success", f"{success:.0%}",
+        f"of {n_sims:,} paths never run out by age {proj['death_age']}",
+        value_class=success_cls)
+    ban_median = _ban_card(
+        "Median at death", _money(median_final),
+        f"middle outcome at age {proj['death_age']}", value_class="text-primary")
+    ban_p10 = _ban_card(
+        "Unlucky (10th pct)", _money(max(p10_final, 0.0)),
+        "1-in-10 downside outcome",
+        value_class="text-danger" if p10_final <= 0 else "text-muted")
+
+    caption = (
+        f"{n_sims:,} bootstrap paths resample {len(pool)} years of your holdings' real "
+        f"annual returns, applied to the same spending stream. The median is the middle "
+        f"outcome; the bands show the 10th–90th and 25th–75th percentile range. "
+        f"Success = the portfolio never hits $0 before age {proj['death_age']}."
+    )
+    return fig, caption, ban_success, ban_median, ban_p10

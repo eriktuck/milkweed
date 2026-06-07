@@ -34,8 +34,10 @@ class HealthCare:
             if age < self.individual.coast_age:
                 # Working years: Out of pocket (payroll deduction is excluded)
                 costs[year] = self.out_of_pocket
-            elif year < 65:
-                # Coast years: ACA or employer insurance
+            elif age < 65:
+                # Coast / early-retirement years (pre-Medicare): ACA or employer
+                # insurance. NB: compares AGE, not the calendar year — the prior
+                # `year < 65` was a bug that made this branch never fire.
                 costs[year] = self.aca_premium + self.out_of_pocket
             else:
                 # Retirement: Medicare + Out-of-pocket
