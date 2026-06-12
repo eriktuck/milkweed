@@ -149,6 +149,19 @@ _input_bar = dbc.Card(dbc.CardBody(dbc.Row([
 
 # ── Expenses calculator (Phase 5) ────────────────────────────────────────────────
 
+# CSP label → display header, in the canonical CSP page order (mirrors
+# pages/csp.py CSP_GROUPS/CSP_DICT). The expenses table groups its rows under
+# these headers; investments/income are filtered out upstream by
+# annual_spend_by_phase, so those groups simply never appear.
+_EXPENSE_GROUPS = [
+    ("fixed", "Fixed Costs"),
+    ("investments", "Investments"),
+    ("sinking", "Sinking"),
+    ("guilt-free", "Guilt Free"),
+]
+_EXPENSE_GROUP_LABEL = dict(_EXPENSE_GROUPS)
+_EXPENSE_GROUP_RANK = {label: i for i, (label, _) in enumerate(_EXPENSE_GROUPS)}
+
 # csp-key column metadata (last column holds the per-row factor hint, read-only).
 _EXPENSE_COLUMNS = [
     {"name": "CSP category", "id": "category", "editable": False},
@@ -181,6 +194,13 @@ _expenses_table = dash_table.DataTable(
         {"if": {"column_id": "go_go"}, "color": "#3f78c4"},
         {"if": {"column_id": "slow_go"}, "color": "#3a9d5d"},
         {"if": {"column_id": "no_go"}, "color": "#b9791b"},
+        # CSP-group divider rows (blank key, category = group header).
+        *[
+            {"if": {"filter_query": f'{{category}} = "{name}"'},
+             "fontWeight": "700", "textTransform": "uppercase", "fontSize": "11px",
+             "color": "#555", "backgroundColor": "#f5f5f5"}
+            for _, name in _EXPENSE_GROUPS
+        ],
     ],
 )
 
@@ -475,6 +495,13 @@ def _factors_for(user_cfg) -> dict:
     return resolve_phase_factors(user_cfg.get("retirement"))
 
 
+def _group_header_row(label: str) -> dict:
+    """A non-numeric divider row that titles a CSP group in the expenses table.
+    Carries a blank `key` so the edit/sum callbacks know to skip it."""
+    return {"key": None, "category": _EXPENSE_GROUP_LABEL[label],
+            "go_go": "", "slow_go": "", "no_go": "", "factor": ""}
+
+
 def _seed_expense_rows(user_cfg) -> list[dict]:
     """One editable row per living-expense csp key, monthly, seeded from the CSP
     plan (go-go) and the research multipliers (slow-go/no-go).
@@ -482,6 +509,10 @@ def _seed_expense_rows(user_cfg) -> list[dict]:
     Reuses the service's filtering (drops contributions/income/healthcare) by
     going through annual_spend_by_phase, then divides back to monthly. The
     per-row `factor` hint and `key` (hidden) ride along in the data.
+
+    Rows are ordered to match the CSP page: grouped by CSP label (Fixed Costs →
+    Investments → Sinking → Guilt Free) and, within each group, following the
+    user's saved `cat_order`. A divider row titles each group.
     """
     csp_labels = user_cfg.get("csp_labels") or {}
     csp_plans = user_cfg.get("csp_plans") or {}
@@ -490,7 +521,7 @@ def _seed_expense_rows(user_cfg) -> list[dict]:
     by_phase = annual_spend_by_phase(active_plan, csp_labels, factors)
 
     rows = []
-    for key, gg_annual in by_phase["go_go"]["by_key"].items():
+    for key in by_phase["go_go"]["by_key"]:
         f = factors.get(key, DEFAULT_PHASE_FACTOR)
         rows.append({
             "key": key,
@@ -500,7 +531,28 @@ def _seed_expense_rows(user_cfg) -> list[dict]:
             "no_go": round(by_phase["no_go"]["by_key"][key] / 12),
             "factor": f"{f.get('slow_go', 1.0):.0%}/{f.get('no_go', 1.0):.0%}",
         })
-    return sorted(rows, key=lambda r: r["go_go"], reverse=True)
+
+    # Order by CSP group, then by the user's category order within each group.
+    order_index = {name: i for i, name in enumerate(user_cfg.get("cat_order") or [])}
+    rows.sort(key=lambda r: (
+        _EXPENSE_GROUP_RANK.get(csp_labels.get(r["key"]), len(_EXPENSE_GROUPS)),
+        order_index.get(r["key"], len(order_index)),
+        r["category"],
+    ))
+
+    # Splice in a divider row whenever the CSP group changes.
+    out: list[dict] = []
+    current = object()  # sentinel so the first group always emits a header
+    for r in rows:
+        label = csp_labels.get(r["key"])
+        if label != current:
+            current = label
+            # `guilt-free` has a single `guilt_free` row that already reads
+            # "Guilt Free", so its header would be redundant — skip it.
+            if label in _EXPENSE_GROUP_LABEL and label != "guilt-free":
+                out.append(_group_header_row(label))
+        out.append(r)
+    return out
 
 
 def _num(v) -> float:
@@ -514,7 +566,7 @@ def _num(v) -> float:
 def _spend_from_table(rows) -> dict:
     """Annual go-go/slow-go/no-go living spend = 12 × Σ each phase column."""
     rows = rows or []
-    return {ph: 12.0 * sum(_num(r.get(ph)) for r in rows) for ph in PHASES}
+    return {ph: 12.0 * sum(_num(r.get(ph)) for r in rows if r.get("key")) for ph in PHASES}
 
 
 # ── Seed assumption inputs from the user's config ────────────────────────────────
@@ -593,6 +645,8 @@ def apply_scale(_n, rows, slow_pct, no_pct, config_data, use_case):
     _pct = lambda v: 1.0 if v in (None, "") else _num(v) / 100.0
     slow_s, no_s = _pct(slow_pct), _pct(no_pct)
     for row in rows:
+        if not row.get("key"):  # skip CSP-group divider rows
+            continue
         gg = _num(row.get("go_go"))
         f = factors.get(row.get("key"), DEFAULT_PHASE_FACTOR)
         row["slow_go"] = round(gg * f.get("slow_go", 1.0) * slow_s)
