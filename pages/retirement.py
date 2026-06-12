@@ -119,12 +119,12 @@ def _money_input(id_, **kw):
 # ── Assumptions header ───────────────────────────────────────────────────────────
 
 _input_bar = dbc.Card(dbc.CardBody(dbc.Row([
-    dbc.Col([
-        dbc.Label("Birth year", className="small text-muted mb-1"),
-        _num_input("ret-birth-year", None, min=1920, max=2010, step=1,
-                   placeholder="needed"),
+    # Birth year drives RMD/current-age math but is owned by the Profile page,
+    # so it's hydrated here as a hidden value rather than an editable control.
+    html.Div([
+        _num_input("ret-birth-year", None, min=1920, max=2010, step=1),
         html.Small(id="ret-birth-hint", className="text-warning"),
-    ], width="auto"),
+    ], style={"display": "none"}),
     dbc.Col([
         dbc.Label("Retirement age", className="small text-muted mb-1"),
         _num_input("ret-retirement-age", 65, min=40, max=90, step=1),
@@ -689,6 +689,8 @@ def seed_assumptions(config_data, use_case):
     _, _, share = _effective_expense_plan(json.loads(config_data), uid)
     if share:
         meta += f" + your {share:.0%} share of household expenses"
+    if not a["birth_year"]:
+        meta += " · ⚠ set your birth date on the Profile page (drives RMD age)"
     return (
         a["birth_year"], a["retirement_age"], a["death_age"], a["slow_go_age"],
         a["no_go_age"], a["claim_age"], a["real_return"] * 100,
