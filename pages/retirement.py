@@ -38,8 +38,10 @@ from core.services.retirement import (
     DEFAULT_PHASE_FACTOR,
     HC_ACA_ANNUAL,
     HC_OOP_ANNUAL,
+    LTC_COST_BY_TYPE,
+    LTC_DEFAULT_ANNUAL,
     LTC_DEFAULT_START_AGE,
-    LTC_DEFAULT_YEARS,
+    LTC_DEFAULT_TYPE,
     MEDICARE_PART_B_MONTHLY_2025,
     PHASES,
     TAXABLE_GAIN_FRACTION,
@@ -107,6 +109,11 @@ def _ban_card(label: str, value: str, subtitle, value_class: str = "") -> dbc.Ca
 
 def _num_input(id_, value, **kw):
     return dbc.Input(id=id_, type="number", value=value, size="sm", **kw)
+
+
+def _money_input(id_, **kw):
+    return dbc.InputGroup([dbc.InputGroupText("$"),
+                           dbc.Input(id=id_, type="number", size="sm", **kw)], size="sm")
 
 
 # ── Assumptions header ───────────────────────────────────────────────────────────
@@ -218,14 +225,8 @@ _expenses_section = dbc.Card(dbc.CardBody([
         html.B("medical & health insurance are excluded here."),
     ], className="text-muted small mb-3"),
 
-    dbc.Row([
-        dbc.Col(_expenses_table, lg=8),
-        dbc.Col(dbc.Card(dbc.CardBody([
-            html.P("Annual living-spend glide", className="text-muted small mb-2"),
-            dcc.Graph(id="ret-glide-chart", config={"displayModeBar": False}),
-            html.P(id="ret-expenses-note", className="text-muted small mt-2 mb-0"),
-        ])), lg=4),
-    ], className="g-3 align-items-start"),
+    _expenses_table,
+    html.P(id="ret-expenses-note", className="text-muted small mt-2 mb-0"),
 
     html.Hr(className="my-3"),
     dbc.Row([
@@ -256,12 +257,60 @@ _expenses_section = dbc.Card(dbc.CardBody([
 ]), className="mb-3")
 
 
+# ── Healthcare (its own expense, modelled apart from day-to-day spend) ────────────
+
+_LTC_TYPE_OPTIONS = [
+    {"label": "None", "value": "none"},
+    {"label": "In-home care", "value": "in_home"},
+    {"label": "Nursing home", "value": "nursing"},
+]
+
+_healthcare_section = dbc.Card(dbc.CardBody([
+    html.Div([
+        html.H4("Healthcare — its own expense", className="d-inline mb-0"),
+        dbc.Badge("rises late", color="warning", className="ms-2 align-middle"),
+    ], className="mb-1"),
+    html.P([
+        "Healthcare is modelled separately from day-to-day spending because it rises late: "
+        "an ", html.B("ACA bridge"), " before Medicare, ", html.B("Medicare + out-of-pocket"),
+        " after 65, then an optional ", html.B("long-term-care"), " spike. The medical & "
+        "health-insurance CSP categories are excluded from the expenses above, so this is "
+        "additive — it completes the spending smile.",
+    ], className="text-muted small mb-3"),
+
+    dbc.Row([
+        dbc.Col([dbc.Label("ACA bridge (pre-65), $/yr", className="small text-muted mb-1"),
+                 _money_input("ret-hc-aca", value=_HC_ACA_DEFAULT, min=0, step=500)], lg=3),
+        dbc.Col([dbc.Label("Medicare + OOP (65+), $/yr", className="small text-muted mb-1"),
+                 _money_input("ret-hc-medicare", value=_HC_MEDICARE_DEFAULT, min=0, step=500)], lg=3),
+        dbc.Col([dbc.Label("Long-term care", className="small text-muted mb-1"),
+                 dbc.Select(id="ret-hc-ltc-type", size="sm", options=_LTC_TYPE_OPTIONS,
+                            value=LTC_DEFAULT_TYPE)], lg=2),
+        dbc.Col([dbc.Label("LTC cost, $/yr", className="small text-muted mb-1"),
+                 _money_input("ret-hc-ltc", value=int(LTC_DEFAULT_ANNUAL), min=0, step=5000)], lg=2),
+        dbc.Col([dbc.Label("LTC start age", className="small text-muted mb-1"),
+                 _num_input("ret-hc-ltc-age", LTC_DEFAULT_START_AGE, min=65, max=105, step=1)], lg=2),
+    ], className="g-2 mb-2"),
+    html.Small("Defaults are research medians (Part B + out-of-pocket; ACA unsubsidized). "
+               "The long-term-care dropdown pre-fills the annual cost from Genworth 2024 "
+               "medians (in-home ~$75k, nursing home ~$128k) — still editable. The LTC "
+               "spike runs from its start age through your planning horizon; choose "
+               "\"None\" to drop it entirely.",
+               className="text-muted d-block mb-0"),
+]), className="mb-3")
+
+
+# ── Healthcare + living spend smile (full-width chart, fed by both sections) ──────
+
+_glide_section = dbc.Card(dbc.CardBody([
+    html.P("Expenses over retirement — living spend, healthcare, and the total",
+           className="text-muted small mb-2"),
+    dcc.Graph(id="ret-glide-chart", config={"displayModeBar": False}),
+    html.P(id="ret-glide-note", className="text-muted small mt-2 mb-0"),
+]), className="mb-3")
+
+
 # ── Income calculator (Phase 6) ──────────────────────────────────────────────────
-
-def _money_input(id_, **kw):
-    return dbc.InputGroup([dbc.InputGroupText("$"),
-                           dbc.Input(id=id_, type="number", size="sm", **kw)], size="sm")
-
 
 def _bucket_inputs(prefix, step):
     """Stacked Taxable / Tax-deferred / Roth money inputs sharing an id prefix."""
@@ -379,30 +428,11 @@ _risk_section = dbc.Card(dbc.CardBody([
         dbc.Badge("sequence-of-returns", color="info", className="ms-2 align-middle"),
     ], className="mb-1"),
     html.P([
-        "Two things a single average return hides: the late-life ", html.B("healthcare"),
-        " rise (the upturn that completes the spending smile) and ", html.B("sequence risk"),
+        "A single average return hides ", html.B("sequence risk"),
         " — a bad run of early-retirement returns can sink a plan that an average return "
-        "says is fine. The fan below bootstraps your holdings' real annual returns.",
+        "says is fine. The fan below bootstraps your holdings' real annual returns over the "
+        "same spending stream (living expenses plus the healthcare glide set above).",
     ], className="text-muted small mb-3"),
-
-    # Healthcare & LTC inputs (drive the projection above + below).
-    html.P("Healthcare & long-term care", className="small fw-bold mb-2"),
-    dbc.Row([
-        dbc.Col([dbc.Label("ACA bridge (pre-65), $/yr", className="small text-muted mb-1"),
-                 _money_input("ret-hc-aca", value=_HC_ACA_DEFAULT, min=0, step=500)], lg=3),
-        dbc.Col([dbc.Label("Medicare + OOP (65+), $/yr", className="small text-muted mb-1"),
-                 _money_input("ret-hc-medicare", value=_HC_MEDICARE_DEFAULT, min=0, step=500)], lg=3),
-        dbc.Col([dbc.Label("LTC spike, $/yr", className="small text-muted mb-1"),
-                 _money_input("ret-hc-ltc", value=0, min=0, step=5000)], lg=2),
-        dbc.Col([dbc.Label("LTC start age", className="small text-muted mb-1"),
-                 _num_input("ret-hc-ltc-age", LTC_DEFAULT_START_AGE, min=65, max=105, step=1)], lg=2),
-        dbc.Col([dbc.Label("LTC years", className="small text-muted mb-1"),
-                 _num_input("ret-hc-ltc-years", LTC_DEFAULT_YEARS, min=0, max=15, step=1)], lg=2),
-    ], className="g-2 mb-2"),
-    html.Small("Defaults are research medians (Part B + out-of-pocket; ACA unsubsidized). "
-               "The LTC spike is off by default — set an annual cost to model a late-life "
-               "care event (Genworth medians ~$71k assisted living → ~$128k nursing home).",
-               className="text-muted d-block mb-3"),
 
     dbc.Row([
         dbc.Col(id="ret-risk-ban-success", lg=4),
@@ -465,6 +495,10 @@ layout = html.Div([
 
         # ── Expenses calculator (Phase 5) ────────────────────────────────────────
         _expenses_section,
+        # ── Healthcare (its own expense) ─────────────────────────────────────────
+        _healthcare_section,
+        # ── Living spend + healthcare smile (full width) ─────────────────────────
+        _glide_section,
         # ── Income calculator (Phase 6) ──────────────────────────────────────────
         _income_section,
         # ── Risk & late-life (Phase 7) ───────────────────────────────────────────
@@ -716,6 +750,19 @@ def apply_scale(_n, rows, slow_pct, no_pct, config_data, use_case):
     return rows
 
 
+# ── Pre-fill the LTC cost from the care-type dropdown (stays editable) ───────────
+
+@callback(
+    Output("ret-hc-ltc", "value"),
+    Input("ret-hc-ltc-type", "value"),
+    prevent_initial_call=True,
+)
+def prefill_ltc_cost(ltc_type):
+    """Seed the LTC annual-cost box from the chosen care type's Genworth median.
+    The box stays editable — the user can override after selecting a type."""
+    return int(LTC_COST_BY_TYPE.get(ltc_type, 0.0))
+
+
 # ── Seed current balances, contribution allocation, gain % from the user's data ──
 
 @callback(
@@ -888,6 +935,7 @@ def estimate_ss(gross_income, employment_type, career_years, config_data, use_ca
     Output("ret-drawdown-chart", "figure"),
     Output("ret-insight", "children"),
     Output("ret-glide-chart", "figure"),
+    Output("ret-glide-note", "children"),
     Output("ret-expenses-totals", "children"),
     Output("ret-expenses-note", "children"),
     Output("ret-cashflow-chart", "figure"),
@@ -910,13 +958,12 @@ def estimate_ss(gross_income, employment_type, career_years, config_data, use_ca
     Input("ret-hc-medicare", "value"),
     Input("ret-hc-ltc", "value"),
     Input("ret-hc-ltc-age", "value"),
-    Input("ret-hc-ltc-years", "value"),
     Input("config-store", "data"),
     Input("use-case", "value"),
 )
 def recompute(retirement_age, death_age, slow_go_age, no_go_age, real_return,
               claim_age, birth_year, expenses_rows, bal_taxable, bal_trad, bal_roth,
-              ss_pia, gain_frac, hc_aca, hc_medicare, hc_ltc, hc_ltc_age, hc_ltc_years,
+              ss_pia, gain_frac, hc_aca, hc_medicare, hc_ltc, hc_ltc_age,
               config_data, use_case):
     uid = _selected_uid(use_case)
     user_cfg = _user_cfg(config_data, uid)
@@ -927,7 +974,7 @@ def recompute(retirement_age, death_age, slow_go_age, no_go_age, real_return,
     if msg:
         blank = _ban_card("—", "—", "")
         empty = _empty_figure(msg)
-        return (blank, blank, blank, blank, empty, "", _empty_figure(""), "", "",
+        return (blank, blank, blank, blank, empty, "", _empty_figure(""), "", "", "",
                 _empty_figure(""), "", None)
 
     retirement_age = int(retirement_age)
@@ -949,8 +996,7 @@ def recompute(retirement_age, death_age, slow_go_age, no_go_age, real_return,
     hc = healthcare_costs_by_age(
         retirement_age, death_age, oop_annual=0.0,
         aca_annual=_num(hc_aca), medicare_annual=_num(hc_medicare),
-        ltc_annual=_num(hc_ltc), ltc_start_age=int(hc_ltc_age or 85),
-        ltc_years=int(hc_ltc_years or 0))
+        ltc_annual=_num(hc_ltc), ltc_start_age=int(hc_ltc_age or 85))
 
     # Backward nest-egg goal: PV of the net (spend + healthcare − SS) stream
     # (pre-tax, the planning target). Independent of starting balances.
@@ -1041,10 +1087,18 @@ def recompute(retirement_age, death_age, slow_go_age, no_go_age, real_return,
     )
     n_rows = len(expenses_rows or [])
     note = (
-        f"{n_rows} living-expense categories from your CSP plan. The glide steps "
-        "down at each phase boundary; the rising healthcare line (set in Risk & "
-        "late-life below) turns this decline into the full spending smile."
+        f"{n_rows} living-expense categories from your CSP plan, stepping down at each "
+        "phase boundary. Healthcare is modelled separately below."
     ) if n_rows else "No CSP plan found — add one on the CSP page to seed these expenses."
+    # Glide-chart caption: peak total (living + healthcare) and where it lands.
+    health_series = {int(k): float(v) for k, v in (hc.to_dict() if hc is not None else {}).items()}
+    hc_peak = max(health_series.values()) if health_series else 0.0
+    living_peak = max(spend.values()) if spend else 0.0
+    glide_note = (
+        f"Living spend steps down from {_money(living_peak)} while healthcare climbs to "
+        f"{_money(hc_peak)} late — the total expenses line is their sum, the spending smile "
+        "that drives the nest-egg goal above."
+    )
 
     # ── Income-section outputs ────────────────────────────────────────────────────
     cashflow = _cashflow_figure(df, retirement_age, slow_go_age, no_go_age, death_age,
@@ -1063,7 +1117,7 @@ def recompute(retirement_age, death_age, slow_go_age, no_go_age, real_return,
     }
 
     return (ban_goal, ban_avg, ban_first, ban_remaining, fig, insight,
-            glide, totals, note, cashflow, income_summary, proj_store)
+            glide, glide_note, totals, note, cashflow, income_summary, proj_store)
 
 
 # ── Figure builders ──────────────────────────────────────────────────────────────
@@ -1135,37 +1189,37 @@ def _drawdown_figure(df, retirement_age, slow_go_age, no_go_age, death_age, goal
 
 
 def _glide_figure(spend, hc, retirement_age, slow_go_age, no_go_age, death_age):
-    """Annual living-spend step-down across the three phases, vs. a flat-spend
-    reference, plus living-spend + healthcare (the rising "smile"). Spend values
-    are positive plan magnitudes — no abs()/negation involved. `hc` is the
-    healthcare-by-age Series."""
+    """Full-width annual expenses over retirement: living spend (step-down across
+    the three phases), healthcare on its own line (the late-life rise), and the
+    total — their sum, the rising "smile" that drives the nest-egg goal. Spend
+    values are positive plan magnitudes; `hc` is the healthcare-by-age Series."""
     ages = list(range(retirement_age, death_age + 1))
-    y = [spend.get(phase_for_age(a, slow_go_age, no_go_age), 0.0) for a in ages]
-    flat = [spend.get("go_go", 0.0)] * len(ages)
+    living = [spend.get(phase_for_age(a, slow_go_age, no_go_age), 0.0) for a in ages]
     health = {int(k): float(v) for k, v in (hc.to_dict() if hc is not None else {}).items()}
-    smile = [yv + health.get(a, 0.0) for a, yv in zip(ages, y)]
+    hc_y = [health.get(a, 0.0) for a in ages]
+    total = [lv + h for lv, h in zip(living, hc_y)]
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(
-        x=ages, y=flat, mode="lines", name="Flat go-go",
-        line=dict(width=1.2, color="#bbb", dash="dot"),
-        hovertemplate="Age %{x}<br>flat %{y:$,.0f}<extra></extra>",
+        x=ages, y=living, mode="lines", name="Living spend",
+        line=dict(width=2.2, color=_C_GOGO, shape="hv"), fill="tozeroy",
+        fillcolor="rgba(127,179,245,0.12)",
+        hovertemplate="Age %{x}<br>living spend %{y:$,.0f}<extra></extra>",
     ))
     fig.add_trace(go.Scatter(
-        x=ages, y=y, mode="lines", name="Living spend",
-        line=dict(width=2.4, color=_C_GOGO, shape="hv"), fill="tozeroy",
-        fillcolor="rgba(127,179,245,0.15)",
-        hovertemplate="Age %{x}<br>spend %{y:$,.0f}<extra></extra>",
+        x=ages, y=hc_y, mode="lines", name="Healthcare",
+        line=dict(width=2.2, color=_C_NOGO, shape="hv"),
+        hovertemplate="Age %{x}<br>healthcare %{y:$,.0f}<extra></extra>",
     ))
     fig.add_trace(go.Scatter(
-        x=ages, y=smile, mode="lines", name="+ healthcare",
-        line=dict(width=2.0, color=_C_NOGO, shape="hv"),
-        hovertemplate="Age %{x}<br>spend + healthcare %{y:$,.0f}<extra></extra>",
+        x=ages, y=total, mode="lines", name="Total expenses",
+        line=dict(width=2.8, color="#444", shape="hv"),
+        hovertemplate="Age %{x}<br>total %{y:$,.0f}<extra></extra>",
     ))
     fig.add_vline(x=slow_go_age, line_width=1, line_dash="dot", line_color="#cbd5e1")
     fig.add_vline(x=no_go_age, line_width=1, line_dash="dot", line_color="#cbd5e1")
     fig.update_layout(
-        **_CHART_LAYOUT, height=240, margin=dict(l=10, r=10, t=10, b=10),
+        **_CHART_LAYOUT, height=320, margin=dict(l=10, r=10, t=30, b=10),
         xaxis=dict(title="Age", showgrid=False),
         yaxis=dict(title=None, tickprefix="$", tickformat="~s", showgrid=True,
                    gridcolor="#eee", zeroline=False, rangemode="tozero"),
