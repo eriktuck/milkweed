@@ -46,9 +46,11 @@ from core.services.retirement import DEFAULTS
 
 CONFIG_COLLECTIONS = ("users", "households")
 
-# Only these (default-able) keys are seeded. birth_year / phase_factors /
-# account_balances are intentionally excluded.
-SEED_KEYS = tuple(DEFAULTS.keys())
+# Only the retirement-scenario knobs are seeded here. Demographics
+# (retirement_age / death_age / claim_age / birth date) are owned by the Profile
+# page and live on the top-level config, so they are NOT written under `retirement`.
+# phase_factors / account_balances are also excluded (per-user, not defaulted).
+SEED_KEYS = ("slow_go_age", "no_go_age", "real_return", "withdrawal_rate")
 
 
 def retirement_seed_update(data: dict) -> tuple[dict, list[str]]:

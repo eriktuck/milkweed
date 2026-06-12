@@ -12,28 +12,20 @@ _DATE_PAT = re.compile(r'^\d{4}-\d{2}-\d{2}$')
 
 
 class RetirementConfig(BaseModel):
-    """Retirement-page planning assumptions, persisted under UserConfig.retirement.
+    """Retirement-page *scenario* assumptions, persisted under UserConfig.retirement.
 
-    Added for the Retirement page (spec-retirement.md, Phase 2). Every field is
-    optional with a code-side default in core/services/retirement.py, so a config
-    that predates this block behaves as if the user accepted all defaults — no
-    Firestore migration is required for read-compatibility (mirrors how
+    Demographics (birth date, retirement / claim / death ages) and income history
+    are owned by the **Profile** page and stored on the top-level UserConfig fields
+    (`birth_date`, `retirement_age`, `claim_age`, `death_age`, `income_segments`).
+    Profile is the single source of truth; core/services/retirement.resolve_assumptions
+    reads demographics from there. This block holds only the knobs specific to the
+    retirement projection.
+
+    Every field is optional with a code-side default in core/services/retirement.py
+    (DEFAULTS), so a config predating this block behaves as if the user accepted all
+    defaults — no Firestore migration required (mirrors how
     transaction_account_settings was introduced).
-
-    Field names reuse the existing core/models/individual.py vocabulary
-    (`birth_year`, `retirement_age`, `death_age`, `claim_age`) so the v1 light
-    service and the future RetirementScenario engine share one set of inputs.
-
-    `birth_year` is the one value that cannot be derived or defaulted (RMD start
-    age depends on it — 73 vs 75); the page captures it on first use and it stays
-    None until then.
     """
-    # Ages / dates -----------------------------------------------------------
-    birth_year: int | None = None          # e.g. 1985; drives RMD start age (Phase 6)
-    retirement_age: int | None = None      # default 65 (see service DEFAULTS)
-    death_age: int | None = None           # planning horizon; default 90
-    claim_age: int | None = None           # Social Security claim age; default 67 (FRA)
-
     # Spending-phase boundaries (ages). go-go = [retirement_age, slow_go_age),
     # slow-go = [slow_go_age, no_go_age), no-go = [no_go_age, death_age].
     slow_go_age: int | None = None         # default 75
@@ -93,10 +85,10 @@ class UserConfig(BaseModel):
     # Absent → service defaults apply; no migration needed (see RetirementConfig).
     retirement: RetirementConfig | None = None
     # ── User Profile (retirement modelling background data) ──
-    # All optional; absent → functional defaults supplied by the model/UI layer.
-    # Edited on the Profile page (pages/profile.py).
-    # NOTE: birth_year/retirement_age/claim_age/death_age also exist on the
-    # `retirement` block above (added in parallel) — see overlap to reconcile.
+    # Source of truth for demographics + income history, edited on the Profile page
+    # (pages/profile.py) and consumed by the Retirement page via
+    # core/services/retirement.resolve_assumptions. All optional; absent → functional
+    # defaults supplied by the model/UI layer.
     birth_date: str | None = None              # ISO "YYYY-MM-DD"; birth_year = year part
     coast_age: int | None = None               # default 50; must be < retirement_age
     retirement_age: int | None = None          # default 67

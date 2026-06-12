@@ -43,6 +43,7 @@ from core.services.retirement import (
     MEDICARE_PART_B_MONTHLY_2025,
     PHASES,
     TAXABLE_GAIN_FRACTION,
+    annual_pia_from_earnings,
     annual_spend_by_phase,
     balances_by_tax_bucket,
     default_contribution_allocation,
@@ -537,8 +538,8 @@ def seed_assumptions(config_data, use_case):
     if user_cfg is None:
         raise dash.exceptions.PreventUpdate
 
-    a = resolve_assumptions(user_cfg.get("retirement"))
-    birth_hint = "" if a["birth_year"] else "needed — drives RMD age (set on the page)"
+    a = resolve_assumptions(user_cfg)
+    birth_hint = "" if a["birth_year"] else "needed — set your birth date on the Profile page (drives RMD age)"
     meta = (
         f"Viewing as {user_cfg.get('name', uid).title()} · spending seeded from your "
         f"latest CSP plan"
@@ -724,21 +725,40 @@ def project_balances(cur_taxable, cur_trad, cur_roth, al_taxable, al_trad, al_ro
     Input("ret-ss-income", "value"),
     Input("ret-ss-emptype", "value"),
     Input("ret-ss-career", "value"),
+    Input("config-store", "data"),
+    Input("use-case", "value"),
 )
-def estimate_ss(gross_income, employment_type, career_years):
-    """Estimate the SS benefit at FRA from gross income + employment type, and
-    write it into the editable SS-benefit field. That field stays the manual
-    override (an SSA-statement figure) until any of these inputs changes."""
+def estimate_ss(gross_income, employment_type, career_years, config_data, use_case):
+    """Estimate the SS benefit at FRA and write it into the editable SS-benefit field
+    (which stays a manual SSA-statement override until any input changes).
+
+    Prefers the real earnings history from the Profile page (income_segments → actual
+    top-35 PIA). Falls back to the constant-income estimate from the gross-income +
+    career-years inputs when the user has no Profile income history yet."""
+    emptype = employment_type or "W2"
+    uid = _selected_uid(use_case)
+    user_cfg = _user_cfg(config_data, uid) or {}
+    segments = user_cfg.get("income_segments")
+
+    if segments:
+        earnings = functions.segments_to_annual_income(segments)  # historical actuals
+        pia = annual_pia_from_earnings(earnings, emptype)
+        n = int((earnings > 0).sum())
+        hint = (f"estimated from your Profile income history ({n} year"
+                f"{'' if n == 1 else 's'} of earnings) — edit on the Profile page, "
+                "or type your SSA statement figure to override")
+        return round(pia), hint
+
     income = _num(gross_income)
     years = int(career_years) if career_years else 35
-    pia = estimate_annual_pia_from_income(income, employment_type or "W2", years)
+    pia = estimate_annual_pia_from_income(income, emptype, years)
     if income > 0:
-        kind = {"1099": "1099 self-employment", "mixed": "mixed"}.get(
-            employment_type, "W-2")
-        hint = (f"estimated from {_money(income)}/yr {kind} over {years} yrs — "
-                "replace with your SSA statement figure to override")
+        kind = {"1099": "1099 self-employment", "mixed": "mixed"}.get(emptype, "W-2")
+        hint = (f"estimated from {_money(income)}/yr {kind} over {years} yrs — add your "
+                "income history on the Profile page, or type your SSA figure to override")
     else:
-        hint = "enter gross income above, or type your SSA figure here directly"
+        hint = ("enter gross income above, add income history on the Profile page, or "
+                "type your SSA figure here directly")
     return round(pia), hint
 
 

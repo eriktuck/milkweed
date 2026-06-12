@@ -231,20 +231,40 @@ ROTH_CONTRIB_CAP: float = 7_000.0      # 2025 IRA contribution limit
 # 4. Config resolution  (pure — merge a RetirementConfig dict over DEFAULTS)
 # ════════════════════════════════════════════════════════════════════════════
 
-def resolve_assumptions(retirement_cfg: dict | None) -> dict:
-    """Merge a user's stored `retirement` config over DEFAULTS.
+def resolve_assumptions(user_cfg: dict | None) -> dict:
+    """Resolve a user's retirement assumptions from their config.
 
-    `retirement_cfg` is the dict under UserConfig.retirement (or None). Any field
-    that is None/absent falls back to DEFAULTS, so a user who has never touched
-    the page gets a complete, sensible assumption set. Returns a flat dict with
-    every key in DEFAULTS plus `birth_year` (None if unknown).
+    Demographics — `retirement_age`, `death_age`, `claim_age`, and `birth_year`
+    (derived from `birth_date`) — come from the **top-level Profile fields**
+    (UserConfig.birth_date + ages); Profile is the single source of truth. Scenario
+    knobs — `slow_go_age`, `no_go_age`, `real_return`, `withdrawal_rate` — come from
+    `UserConfig.retirement`. Anything None/absent falls back to DEFAULTS, so a user
+    who has touched neither page gets a complete, sensible set. Returns a flat dict
+    with every key in DEFAULTS plus `birth_year` (None if no birth date saved).
 
-    Pure: callers pass the already-deserialized config dict from config-store.
+    `user_cfg` is the full deserialized user config dict from config-store.
+    Pure: callers pass the dict; no Firestore access.
     """
-    cfg = retirement_cfg or {}
-    resolved = {k: cfg.get(k) if cfg.get(k) is not None else v
-                for k, v in DEFAULTS.items()}
-    resolved["birth_year"] = cfg.get("birth_year")
+    cfg = user_cfg or {}
+    ret = cfg.get("retirement") or {}
+
+    def pick(key, src):
+        v = src.get(key)
+        return v if v is not None else DEFAULTS[key]
+
+    resolved = {
+        # Demographics — owned by Profile (top-level fields)
+        "retirement_age": pick("retirement_age", cfg),
+        "death_age": pick("death_age", cfg),
+        "claim_age": pick("claim_age", cfg),
+        # Scenario knobs — owned by the Retirement page (UserConfig.retirement)
+        "slow_go_age": pick("slow_go_age", ret),
+        "no_go_age": pick("no_go_age", ret),
+        "real_return": pick("real_return", ret),
+        "withdrawal_rate": pick("withdrawal_rate", ret),
+    }
+    birth_date = cfg.get("birth_date")
+    resolved["birth_year"] = int(str(birth_date)[:4]) if birth_date else None
     return resolved
 
 
@@ -696,6 +716,27 @@ def estimate_annual_pia_from_income(
     earnings = covered_earnings(gross_income, employment_type)
     years = min(max(int(career_years), 0), AIME_YEARS)
     aime = earnings * years / (AIME_YEARS * 12)
+    return primary_insurance_amount(aime) * 12.0
+
+
+def annual_pia_from_earnings(earnings, employment_type: str = "W2") -> float:
+    """Annual Social Security benefit **at FRA (67)** from a real per-year earnings
+    series (e.g. the Profile income history via segments_to_annual_income).
+
+    The accurate counterpart to `estimate_annual_pia_from_income`: instead of
+    assuming a constant income, it uses actual annual earnings. Each year is capped
+    at the OASDI wage base via `covered_earnings`; the top 35 form the AIME (always
+    divided by 35×12, so a short career averages in $0). Returns the FRA figure; the
+    claim-age factor is applied downstream by `social_security_income`.
+
+    `earnings` is any iterable of annual gross amounts (pd.Series or list).
+    """
+    covered = [covered_earnings(v, employment_type) for v in earnings
+               if v is not None and float(v) > 0]
+    if not covered:
+        return 0.0
+    top = sorted(covered, reverse=True)[:AIME_YEARS]
+    aime = sum(top) / (AIME_YEARS * 12)
     return primary_insurance_amount(aime) * 12.0
 
 
