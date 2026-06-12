@@ -24,7 +24,12 @@ from core.services.forecast import (
     trailing_12mo_contribution,
 )
 from core.services.investments import fetch_latest_holdings
-from core.services.retirement import default_nest_egg_goal
+from core.services.projection import simulate_lifetime
+from core.services.retirement import (
+    balances_by_tax_bucket,
+    default_contribution_allocation,
+    default_nest_egg_goal,
+)
 from core.services.returns import (
     bootstrap_projection,
     build_returns_payload,
@@ -39,6 +44,11 @@ _C_GROWTH = "#4ade80"      # green — market growth
 _C_TARGET = "#f59e0b"      # amber — CoastFIRE target / retirement
 _C_TOTAL = "#444444"       # total value line
 _C_WORKING = "#3b82f6"
+
+# Tax-bucket stack colors (for the "Tax bucket" projection view).
+_C_TAXABLE = "#5b7ec9"     # blue
+_C_TRAD = "#8b5cf6"        # violet — tax-deferred
+_C_ROTH = "#14b8a6"        # teal — Roth
 
 # Asset-class line colors for the historical-returns chart.
 _CLASS_COLORS = {
@@ -127,6 +137,11 @@ def _num_input(id_, value, **kw):
     return dbc.Input(id=id_, type="number", value=value, size="sm", **kw)
 
 
+def _money_input(id_, **kw):
+    return dbc.InputGroup([dbc.InputGroupText("$"),
+                           dbc.Input(id=id_, type="number", size="sm", **kw)], size="sm")
+
+
 # Current age (from birth date) and retirement age (from Profile) are derived, not
 # entered here — they live in hidden stores (see layout) and are surfaced in fc-meta.
 _input_bar = dbc.Card(dbc.CardBody(dbc.Row([
@@ -152,6 +167,30 @@ _input_bar = dbc.Card(dbc.CardBody(dbc.Row([
 ], className="g-3 align-items-end")), className="mb-3")
 
 
+# ── Contribution split across tax buckets (seeds the future allocation feature) ──
+_allocation_card = dbc.Card(dbc.CardBody([
+    dbc.Row([
+        dbc.Col([
+            html.P("Contribution split", className="small fw-bold mb-1"),
+            html.Small(
+                "How your monthly contribution lands across accounts — "
+                "tax-advantaged-first by default, editable. Drives the "
+                "“Tax bucket” view of the chart.",
+                className="text-muted",
+            ),
+        ], lg=4, xs=12),
+        dbc.Col([dbc.Label("Taxable $/yr", className="small text-muted mb-1"),
+                 _money_input("fc-alloc-taxable", value=0, min=0, step=500)], lg=2, xs=4),
+        dbc.Col([dbc.Label("Tax-deferred $/yr", className="small text-muted mb-1"),
+                 _money_input("fc-alloc-trad", value=0, min=0, step=500)], lg=3, xs=4),
+        dbc.Col([dbc.Label("Roth $/yr", className="small text-muted mb-1"),
+                 _money_input("fc-alloc-roth", value=0, min=0, step=500)], lg=3, xs=4),
+    ], className="g-2 align-items-end"),
+    html.Small(id="fc-alloc-hint", className="text-muted d-block mt-1"),
+    html.Small(id="fc-bucket-balances", className="text-muted d-block"),
+]), className="mb-3", color="light")
+
+
 # ── Page layout ───────────────────────────────────────────────────────────────
 
 layout = html.Div([
@@ -171,6 +210,7 @@ layout = html.Div([
         ], className="pt-3 pb-2", align="center"),
 
         _input_bar,
+        _allocation_card,
 
         # BANs (filled by callback): goal → coast target → projected → required
         dbc.Row([
@@ -183,7 +223,16 @@ layout = html.Div([
         # Charts
         dbc.Row([
             dbc.Col(dbc.Card(dbc.CardBody([
-                html.P("Portfolio value over time — by phase", className="text-muted small mb-2"),
+                html.Div([
+                    html.P("Portfolio value over time", className="text-muted small mb-0 d-inline"),
+                    dbc.RadioItems(
+                        id="fc-color-mode", value="pg", inline=True,
+                        options=[{"label": "Principal/Growth", "value": "pg"},
+                                 {"label": "Tax bucket", "value": "bucket"}],
+                        className="small float-end",
+                        inputClassName="me-1", labelClassName="me-2",
+                    ),
+                ], className="mb-2"),
                 dcc.Loading(dcc.Graph(id="fc-projection-chart", config={"displayModeBar": False}), type="circle"),
             ])), width=8),
             dbc.Col(dbc.Card(dbc.CardBody([
@@ -234,6 +283,11 @@ layout = html.Div([
     Output("fc-monthly-contribution", "value"),
     Output("fc-contribution-hint", "children"),
     Output("fc-meta", "children"),
+    Output("fc-alloc-taxable", "value"),
+    Output("fc-alloc-trad", "value"),
+    Output("fc-alloc-roth", "value"),
+    Output("fc-alloc-hint", "children"),
+    Output("fc-bucket-balances", "children"),
     Input("config-store", "data"),
     State("transaction-data-store", "data"),
 )
@@ -276,6 +330,21 @@ def seed_defaults(config_data, txn_json):
     if not contribution_hint:
         contribution_hint = "from CSP plan (investments)" if monthly else "no CSP plan — enter manually"
 
+    # Contribution split across tax buckets: default the annual contribution
+    # tax-advantaged-first (pre-tax cap → Roth cap → taxable). Each stays editable.
+    accounts = user_cfg.get("investment_accounts")
+    alloc = default_contribution_allocation(monthly * 12.0)
+    alloc_hint = ("tax-advantaged-first split of your monthly contribution — editable"
+                  if monthly else "no contribution to split — set a monthly amount above")
+
+    # Current balances by tax bucket (read-only context for the split).
+    buckets = balances_by_tax_bucket(uid, accounts)
+    if buckets["total"] > 0:
+        bal_hint = (f"current balances · taxable {_money(buckets['taxable'])} · "
+                    f"tax-deferred {_money(buckets['trad'])} · roth {_money(buckets['roth'])}")
+    else:
+        bal_hint = "no holdings found — upload a Vanguard CSV on the Investments page"
+
     # Surface the derived demographics (no longer rail inputs) so they're visible.
     has_birth = bool(user_cfg.get("birth_date"))
     age_bit = (f"Age {current_age} · retiring at {retirement_age}" if has_birth
@@ -287,7 +356,9 @@ def seed_defaults(config_data, txn_json):
     meta = f"{age_bit} · {portfolio_bit}"
 
     return (current_age, coast_age, retirement_age,
-            round(monthly, 2), contribution_hint, meta)
+            round(monthly, 2), contribution_hint, meta,
+            round(alloc["taxable"], 2), round(alloc["trad"], 2), round(alloc["roth"], 2),
+            alloc_hint, bal_hint)
 
 
 # ── Recompute: BANs + charts ─────────────────────────────────────────────────────
@@ -305,11 +376,16 @@ def seed_defaults(config_data, txn_json):
     Input("fc-retirement-age", "data"),
     Input("fc-monthly-contribution", "value"),
     Input("fc-real-return", "value"),
+    Input("fc-alloc-taxable", "value"),
+    Input("fc-alloc-trad", "value"),
+    Input("fc-alloc-roth", "value"),
+    Input("fc-color-mode", "value"),
     Input("config-store", "data"),
     Input("retirement-goal-store", "data"),
 )
 def recompute(current_age, coast_age, retirement_age, monthly_contribution,
-              real_return, config_data, goal_store):
+              real_return, alloc_taxable, alloc_trad, alloc_roth, color_mode,
+              config_data, goal_store):
     uid = session.get("user_id")
     if not uid:
         raise dash.exceptions.PreventUpdate
@@ -390,8 +466,27 @@ def recompute(current_age, coast_age, retirement_age, monthly_contribution,
     )
 
     # ── Figures ─────────────────────────────────────────────────────────────────
+    # Per-bucket accumulation for the "Tax bucket" view (only when that view is on).
+    # Same accumulation recurrence as project_portfolio, so the bucket totals
+    # reconcile with the aggregate when the split sums to the monthly contribution.
+    bucket_df = None
+    if color_mode == "bucket":
+        config = json.loads(config_data) if isinstance(config_data, str) else (config_data or {})
+        accounts = config.get("users", {}).get(uid, {}).get("investment_accounts")
+        start_buckets = balances_by_tax_bucket(uid, accounts)
+        allocation = {"taxable": float(alloc_taxable or 0), "trad": float(alloc_trad or 0),
+                      "roth": float(alloc_roth or 0)}
+        bucket_df = simulate_lifetime(
+            buckets=start_buckets, allocation=allocation,
+            current_age=current_age, coast_age=coast_age,
+            retirement_age=retirement_age, death_age=retirement_age,
+            spend_by_phase={}, slow_go_age=retirement_age, no_go_age=retirement_age,
+            r_accum=real_return, r_retire=real_return,
+        )
+
     fig = _projection_figure(
-        df, s["retirement_goal"], s["coast_target"], coast_age, retirement_age, real_return,
+        df, bucket_df, color_mode, s["retirement_goal"], s["coast_target"],
+        coast_age, retirement_age, real_return,
     )
     donut, insight = _donut_figure(df, retirement_age, s, real_return)
 
@@ -423,30 +518,49 @@ def _empty_figure(message: str) -> go.Figure:
     return fig
 
 
-def _projection_figure(df, retirement_goal, coast_target, coast_age,
-                       retirement_age, real_return) -> go.Figure:
+def _projection_figure(df, bucket_df, mode, retirement_goal, coast_target,
+                       coast_age, retirement_age, real_return) -> go.Figure:
     ages = df.index.tolist()
     fig = go.Figure()
 
-    # Stacked areas: principal (bottom) + growth (top).
-    fig.add_trace(go.Scatter(
-        x=ages, y=df["principal"], name="Principal", mode="lines",
-        line=dict(width=0, color=_C_PRINCIPAL), stackgroup="v",
-        fillcolor="rgba(91,126,201,0.45)",
-        hovertemplate="Age %{x}<br>Principal %{y:$,.0f}<extra></extra>",
-    ))
-    fig.add_trace(go.Scatter(
-        x=ages, y=df["growth"], name="Growth", mode="lines",
-        line=dict(width=0, color=_C_GROWTH), stackgroup="v",
-        fillcolor="rgba(74,222,128,0.35)",
-        hovertemplate="Age %{x}<br>Growth %{y:$,.0f}<extra></extra>",
-    ))
-    # Total value line on top of the stack.
-    fig.add_trace(go.Scatter(
-        x=ages, y=df["total"], name="Total value", mode="lines",
-        line=dict(width=2.5, color=_C_TOTAL),
-        hovertemplate="Age %{x}<br>Total %{y:$,.0f}<extra></extra>",
-    ))
+    if mode == "bucket" and bucket_df is not None:
+        # Stacked areas by tax bucket: taxable + tax-deferred + Roth.
+        bages = bucket_df.index.tolist()
+        for col, name, color, fill in (
+            ("taxable", "Taxable", _C_TAXABLE, "rgba(91,126,201,0.45)"),
+            ("trad", "Tax-deferred", _C_TRAD, "rgba(139,92,246,0.35)"),
+            ("roth", "Roth", _C_ROTH, "rgba(20,184,166,0.35)"),
+        ):
+            fig.add_trace(go.Scatter(
+                x=bages, y=bucket_df[col], name=name, mode="lines",
+                line=dict(width=0, color=color), stackgroup="v", fillcolor=fill,
+                hovertemplate=f"Age %{{x}}<br>{name} %{{y:$,.0f}}<extra></extra>",
+            ))
+        fig.add_trace(go.Scatter(
+            x=bages, y=bucket_df["total"], name="Total value", mode="lines",
+            line=dict(width=2.5, color=_C_TOTAL),
+            hovertemplate="Age %{x}<br>Total %{y:$,.0f}<extra></extra>",
+        ))
+    else:
+        # Stacked areas: principal (bottom) + growth (top).
+        fig.add_trace(go.Scatter(
+            x=ages, y=df["principal"], name="Principal", mode="lines",
+            line=dict(width=0, color=_C_PRINCIPAL), stackgroup="v",
+            fillcolor="rgba(91,126,201,0.45)",
+            hovertemplate="Age %{x}<br>Principal %{y:$,.0f}<extra></extra>",
+        ))
+        fig.add_trace(go.Scatter(
+            x=ages, y=df["growth"], name="Growth", mode="lines",
+            line=dict(width=0, color=_C_GROWTH), stackgroup="v",
+            fillcolor="rgba(74,222,128,0.35)",
+            hovertemplate="Age %{x}<br>Growth %{y:$,.0f}<extra></extra>",
+        ))
+        # Total value line on top of the stack.
+        fig.add_trace(go.Scatter(
+            x=ages, y=df["total"], name="Total value", mode="lines",
+            line=dict(width=2.5, color=_C_TOTAL),
+            hovertemplate="Age %{x}<br>Total %{y:$,.0f}<extra></extra>",
+        ))
 
     # Phase background bands.
     fig.add_vrect(x0=ages[0], x1=coast_age, fillcolor=_C_WORKING, opacity=0.06,
