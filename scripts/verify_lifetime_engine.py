@@ -16,9 +16,10 @@ Run from the repo root:
     python -m scripts.verify_lifetime_engine
 """
 
-from core.services.forecast import project_portfolio
+from core.services.forecast import forecast_summary, project_portfolio
 from core.services.projection import simulate_lifetime
 from core.services.retirement import (
+    default_nest_egg_goal,
     project_balances_to_retirement,
     project_retirement_taxaware,
 )
@@ -119,12 +120,46 @@ def check_bucket_additivity() -> None:
     print("  bucket split is additive ✓")
 
 
+def check_forecast_summary_consumes_goal() -> None:
+    # forecast_summary now takes the goal directly (no annual_spend/4%).
+    start, current_age, coast_age, retirement_age, r = 250_000.0, 40, 50, 65, 0.05
+    goal = 2_000_000.0
+    df = project_portfolio(
+        start_value=start, current_age=current_age, coast_age=coast_age,
+        retirement_age=retirement_age, horizon_age=retirement_age,
+        annual_contribution=30_000.0, real_return=r,
+    )
+    s = forecast_summary(df, goal, r, start, current_age, coast_age, retirement_age)
+    assert abs(s["retirement_goal"] - goal) < TOL, s["retirement_goal"]
+    expected_coast = goal / ((1 + r) ** (retirement_age - coast_age))
+    assert abs(s["coast_target"] - expected_coast) < TOL, s["coast_target"]
+    assert "sustainable_income" not in s, "swr-derived field should be gone"
+    print(f"  forecast_summary consumes goal ✓  coast target {s['coast_target']:,.0f}")
+
+
+def check_default_goal_from_config() -> None:
+    # A minimal config + CSP plan → a real, non-negative PV-based goal.
+    plan = {"mortgage": 2000.0, "groceries": 600.0, "guilt_free": 800.0,
+            "income": 7000.0, "savings": 1500.0}
+    labels = {"mortgage": "fixed", "groceries": "fixed", "guilt_free": "guilt-free",
+              "income": "income", "savings": "investments"}
+    cfg = {"birth_date": "1985-01-01", "retirement_age": 65, "death_age": 90,
+           "claim_age": 67, "retirement": {"real_return": 0.05}}
+    goal = default_nest_egg_goal(cfg, plan, labels)
+    assert goal >= 0.0 and goal < 50_000_000.0, goal
+    # Sanity: a goal of this spend should be in the low millions, not zero.
+    assert goal > 100_000.0, f"goal implausibly small: {goal}"
+    print(f"  default_nest_egg_goal from config ✓  {goal:,.0f}")
+
+
 def main() -> None:
     check_taxaware_golden()
     check_balances_golden()
     check_reconciles_with_forecast()
     check_bucket_additivity()
-    print("\nLifetime engine (Step 1) verified ✓")
+    check_forecast_summary_consumes_goal()
+    check_default_goal_from_config()
+    print("\nLifetime engine + goal handshake verified ✓")
 
 
 if __name__ == "__main__":

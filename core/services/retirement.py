@@ -651,6 +651,66 @@ def nest_egg_goal(
     ))
 
 
+def default_nest_egg_goal(
+    user_cfg: dict | None,
+    active_plan: dict | None,
+    csp_labels: dict | None,
+) -> float:
+    """The from-config nest-egg goal — the default backward-from-spending PV.
+
+    Single source of the *default* goal math. The Retirement page tunes the same
+    pipeline interactively (editable expense table, healthcare, SS) and overrides
+    this via `retirement-goal-store`; this function gives the Forecast page — and a
+    first-load Retirement page — a real PV-based goal with no page interaction,
+    strictly better than Forecast's old `annual_spend / 4%`.
+
+    Mirrors the Retirement page's defaults:
+      * spend — phase totals from the CSP plan (`annual_spend_by_phase`), healthcare
+        keys excluded (modelled separately below).
+      * healthcare — the module-default ACA-bridge → Medicare → LTC glide
+        (`healthcare_costs_by_age` with its defaults; oop folded into those totals).
+      * Social Security — Profile earnings history → PIA when present, else a
+        CSP-`income` constant-income estimate; 0 when neither is available.
+
+    Pure: callers pass the deserialized config + plan dicts (no Firestore). Returns
+    a non-negative goal (0 when Social Security alone covers spending).
+    """
+    a = resolve_assumptions(user_cfg)
+    retirement_age = int(a["retirement_age"])
+    death_age = int(a["death_age"])
+    slow_go_age = int(a["slow_go_age"])
+    no_go_age = int(a["no_go_age"])
+    claim_age = int(a["claim_age"])
+    r = float(a["real_return"])
+
+    # Spend: phase totals from the CSP plan (healthcare excluded inside the helper).
+    phase_factors = resolve_phase_factors((user_cfg or {}).get("retirement"))
+    by_phase = annual_spend_by_phase(active_plan, csp_labels, phase_factors)
+    spend = {p: by_phase[p]["total"] for p in PHASES}
+
+    # Healthcare: the module-default late-life glide (same defaults the page seeds).
+    hc = healthcare_costs_by_age(retirement_age, death_age)
+
+    # Social Security: prefer Profile earnings history; else a CSP-income estimate.
+    segments = (user_cfg or {}).get("income_segments")
+    if segments:
+        from core.utils.functions import segments_to_annual_income
+        pia = annual_pia_from_earnings(segments_to_annual_income(segments))
+    else:
+        labels = csp_labels or {}
+        annual_income = 12.0 * sum(
+            float(amt) for key, amt in (active_plan or {}).items()
+            if labels.get(key) == "income"
+        )
+        pia = estimate_annual_pia_from_income(annual_income) if annual_income else 0.0
+    ss = social_security_income(pia, claim_age, retirement_age, death_age)
+
+    stream = project_retirement(0.0, retirement_age, death_age, spend,
+                                slow_go_age, no_go_age, r,
+                                income_by_age=ss, healthcare_by_age=hc)
+    return max(nest_egg_goal(stream, r), 0.0)
+
+
 def retirement_summary(
     projection_df: pd.DataFrame,
     real_return: float,

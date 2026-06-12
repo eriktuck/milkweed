@@ -457,6 +457,12 @@ layout = html.Div([
     # drawdown stream (so the fan recomputes without redoing the projection).
     dcc.Store(id="ret-returns-store", storage_type="memory"),
     dcc.Store(id="ret-projection-store", storage_type="memory"),
+    # Page-local hop for the nest-egg goal: recompute writes it here, then a relay
+    # (page-local input → global output) copies it to the global retirement-goal-store
+    # for the Forecast page. The relay's only trigger is this page-local store, so —
+    # unlike recompute (which has global config-store/use-case inputs) — it is never
+    # dispatched on other pages. Mirrors components/investment_upload.py.
+    dcc.Store(id="ret-goal-local", storage_type="memory"),
     dbc.Container([
         dbc.Row([
             dbc.Col(html.H1("Retirement"), width="auto"),
@@ -943,7 +949,7 @@ def estimate_ss(gross_income, employment_type, career_years, config_data, use_ca
     Output("ret-cashflow-chart", "figure"),
     Output("ret-income-summary", "children"),
     Output("ret-projection-store", "data"),
-    Output("retirement-goal-store", "data"),
+    Output("ret-goal-local", "data"),
     Input("ret-retirement-age", "value"),
     Input("ret-death-age", "value"),
     Input("ret-slow-go-age", "value"),
@@ -1136,6 +1142,22 @@ def recompute(retirement_age, death_age, slow_go_age, no_go_age, real_return,
     return (ban_goal, ban_avg, ban_first, ban_remaining, fig, insight,
             glide, glide_note, totals, note, cashflow, income_summary, proj_store,
             goal_store)
+
+
+# ── Goal handshake relay → Forecast page ─────────────────────────────────────────
+# Copies the page-local goal to the global retirement-goal-store. Its only trigger
+# is the page-local ret-goal-local, so (unlike recompute, which reads the global
+# config-store/use-case) it is never dispatched on other pages and cannot reference
+# the absent ret-* inputs there. Mirrors components/investment_upload.py's writer.
+@callback(
+    Output("retirement-goal-store", "data"),
+    Input("ret-goal-local", "data"),
+    prevent_initial_call=True,
+)
+def publish_goal(goal_local):
+    if goal_local is None:
+        raise dash.exceptions.PreventUpdate
+    return goal_local
 
 
 # ── Figure builders ──────────────────────────────────────────────────────────────

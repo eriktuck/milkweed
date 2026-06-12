@@ -208,24 +208,29 @@ def required_monthly_contribution(
 
 def forecast_summary(
     projection_df: pd.DataFrame,
-    annual_spend: float,
+    retirement_goal: float,
     real_return: float,
     start_value: float,
     current_age: int,
     coast_age: int,
     retirement_age: int,
-    swr: float = SWR,
 ) -> dict:
     """Headline numbers for the BANs.
 
+    `retirement_goal` is the nest egg needed AT retirement — supplied by the
+    Retirement page (the precise backward-from-spending PV) via the shared
+    `retirement-goal-store`, or `retirement.default_nest_egg_goal` when the store
+    is empty. Forecast no longer derives it from `annual_spend / 4%`; its job is to
+    turn that goal into the coast target and the required contribution.
+
     Distinguishes the two CoastFIRE quantities:
-      retirement_goal  — nest egg needed AT retirement = annual_spend / swr
+      retirement_goal  — nest egg needed AT retirement (given)
       coast_target     — amount needed AT coast_age so growth alone (no further
                          contributions) reaches retirement_goal by retirement_age
                          = retirement_goal / (1+r)^(retirement_age − coast_age)
 
     Returns:
-        retirement_goal          — nest egg target at retirement
+        retirement_goal          — nest egg target at retirement (echoed back)
         coast_target             — target at coast age (the dashboard's focus)
         projected_at_coast       — projected balance at coast_age (given contribution)
         coast_surplus            — projected_at_coast − coast_target
@@ -233,15 +238,13 @@ def forecast_summary(
                                    still hit the goal by retirement, or None
         required_monthly         — monthly contribution to hit coast_target by coast_age
         projected_at_retirement  — total at first retirement-phase age
-        sustainable_income       — swr × projected_at_retirement
     """
-    annual_spend = float(annual_spend)
+    retirement_goal = float(retirement_goal)
     r = float(real_return)
     current_age = int(current_age)
     coast_age = int(coast_age)
     retirement_age = int(retirement_age)
 
-    retirement_goal = annual_spend / swr if swr else 0.0
     years_coast_to_ret = max(retirement_age - coast_age, 0)
     coast_target = retirement_goal / ((1 + r) ** years_coast_to_ret)
 
@@ -279,5 +282,4 @@ def forecast_summary(
         "coast_point_age": coast_point_age,
         "required_monthly": required_monthly,
         "projected_at_retirement": projected_at_retirement,
-        "sustainable_income": swr * projected_at_retirement,
     }

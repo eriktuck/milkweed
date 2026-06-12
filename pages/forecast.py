@@ -17,15 +17,14 @@ from flask import session
 
 import core.utils.functions as functions
 from core.services.forecast import (
-    SWR,
     current_portfolio_value,
-    default_annual_retirement_spend,
     default_monthly_contribution,
     forecast_summary,
     project_portfolio,
     trailing_12mo_contribution,
 )
 from core.services.investments import fetch_latest_holdings
+from core.services.retirement import default_nest_egg_goal
 from core.services.returns import (
     bootstrap_projection,
     build_returns_payload,
@@ -91,6 +90,29 @@ def _age_from_birth_date(birth_date) -> int | None:
     return today.year - b.year - ((today.month, today.day) < (b.month, b.day))
 
 
+def _resolve_goal(goal_store, uid, retirement_age, config_data) -> tuple[float, str]:
+    """The nest-egg goal Forecast should plan to, and where it came from.
+
+    Prefers the Retirement page's tuned goal from `retirement-goal-store` when it
+    belongs to this user and was computed for the same retirement age (the
+    stale-guard); otherwise falls back to `default_nest_egg_goal` from config so
+    Forecast works standalone before Retirement is ever opened. Returns
+    (goal, "tuned" | "default").
+    """
+    if (isinstance(goal_store, dict)
+            and goal_store.get("uid") == uid
+            and goal_store.get("nest_egg_goal") is not None
+            and int(goal_store.get("retirement_age", -1)) == int(retirement_age)):
+        return float(goal_store["nest_egg_goal"]), "tuned"
+
+    config = json.loads(config_data) if isinstance(config_data, str) else (config_data or {})
+    user_cfg = config.get("users", {}).get(uid, {})
+    csp_labels = user_cfg.get("csp_labels") or {}
+    csp_plans = user_cfg.get("csp_plans") or {}
+    active_plan = functions.get_active_csp_plan(csp_plans) or user_cfg.get("csp_plan") or {}
+    return default_nest_egg_goal(user_cfg, active_plan, csp_labels), "default"
+
+
 def _ban_card(label: str, value: str, subtitle, value_class: str = "") -> dbc.Card:
     return dbc.Card(dbc.CardBody([
         html.P(label, className="text-muted small mb-1"),
@@ -105,18 +127,12 @@ def _num_input(id_, value, **kw):
     return dbc.Input(id=id_, type="number", value=value, size="sm", **kw)
 
 
+# Current age (from birth date) and retirement age (from Profile) are derived, not
+# entered here — they live in hidden stores (see layout) and are surfaced in fc-meta.
 _input_bar = dbc.Card(dbc.CardBody(dbc.Row([
-    dbc.Col([
-        dbc.Label("Current age", className="small text-muted mb-1"),
-        _num_input("fc-current-age", _DEFAULT_CURRENT_AGE, min=18, max=100, step=1),
-    ], width="auto"),
     dbc.Col([
         dbc.Label("Coast age", className="small text-muted mb-1"),
         _num_input("fc-coast-age", _DEFAULT_COAST_AGE, min=18, max=100, step=1),
-    ], width="auto"),
-    dbc.Col([
-        dbc.Label("Retirement age", className="small text-muted mb-1"),
-        _num_input("fc-retirement-age", _DEFAULT_RETIREMENT_AGE, min=40, max=100, step=1),
     ], width="auto"),
     dbc.Col([
         dbc.Label("Monthly contribution", className="small text-muted mb-1"),
@@ -133,15 +149,6 @@ _input_bar = dbc.Card(dbc.CardBody(dbc.Row([
                    value=False, className="small mt-1"),
         html.Small(id="fc-suggested-hint", className="text-muted"),
     ], width="auto"),
-    dbc.Col([
-        dbc.Label("Annual retirement spend", className="small text-muted mb-1"),
-        _num_input("fc-annual-spend", 0, min=0, step=1000),
-        html.Small(id="fc-spend-hint", className="text-success"),
-    ], width="auto"),
-    dbc.Col([
-        dbc.Label("Withdrawal rate", className="small text-muted mb-1"),
-        dbc.Input(value=f"{SWR:.0%}", size="sm", disabled=True, style={"width": "70px"}),
-    ], width="auto"),
 ], className="g-3 align-items-end")), className="mb-3")
 
 
@@ -149,6 +156,11 @@ _input_bar = dbc.Card(dbc.CardBody(dbc.Row([
 
 layout = html.Div([
     dcc.Store(id="fc-returns-store", storage_type="memory"),
+    # Derived demographics (seed_defaults fills them from the saved Profile):
+    # current age from birth date, retirement age from the Profile retirement age.
+    # Hidden — not user inputs — but they drive the projection and validation.
+    dcc.Store(id="fc-current-age", storage_type="memory", data=_DEFAULT_CURRENT_AGE),
+    dcc.Store(id="fc-retirement-age", storage_type="memory", data=_DEFAULT_RETIREMENT_AGE),
     dbc.Container([
         dbc.Row([
             dbc.Col(html.H1("Forecast"), width="auto"),
@@ -216,13 +228,11 @@ layout = html.Div([
 # ── Defaults: seed contribution + spend from CSP plan & holdings ────────────────
 
 @callback(
-    Output("fc-current-age", "value"),
+    Output("fc-current-age", "data"),
     Output("fc-coast-age", "value"),
-    Output("fc-retirement-age", "value"),
+    Output("fc-retirement-age", "data"),
     Output("fc-monthly-contribution", "value"),
-    Output("fc-annual-spend", "value"),
     Output("fc-contribution-hint", "children"),
-    Output("fc-spend-hint", "children"),
     Output("fc-meta", "children"),
     Input("config-store", "data"),
     State("transaction-data-store", "data"),
@@ -249,7 +259,6 @@ def seed_defaults(config_data, txn_json):
     active_plan = functions.get_active_csp_plan(csp_plans) or user_cfg.get("csp_plan") or {}
 
     monthly = default_monthly_contribution(active_plan, csp_labels)
-    annual_spend = default_annual_retirement_spend(active_plan, csp_labels)
 
     # Trailing-12-month actual contribution hint (informational only).
     contribution_hint = ""
@@ -264,20 +273,21 @@ def seed_defaults(config_data, txn_json):
         except Exception:
             contribution_hint = ""
 
-    spend_hint = "from CSP plan (fixed + guilt-free + sinking)" if annual_spend else "no CSP plan — enter manually"
     if not contribution_hint:
         contribution_hint = "from CSP plan (investments)" if monthly else "no CSP plan — enter manually"
 
+    # Surface the derived demographics (no longer rail inputs) so they're visible.
+    has_birth = bool(user_cfg.get("birth_date"))
+    age_bit = (f"Age {current_age} · retiring at {retirement_age}" if has_birth
+               else f"Set your birth date on the Profile page (assuming age {current_age})")
     portfolio_value = current_portfolio_value(uid)
-    meta = (
-        f"Starting portfolio {_money(portfolio_value)} · contributions from CSP plan"
-        if portfolio_value else
-        "No holdings found — upload a Vanguard CSV on the Investments page"
-    )
+    portfolio_bit = (f"starting portfolio {_money(portfolio_value)} · contributions from CSP plan"
+                     if portfolio_value else
+                     "no holdings — upload a Vanguard CSV on the Investments page")
+    meta = f"{age_bit} · {portfolio_bit}"
 
     return (current_age, coast_age, retirement_age,
-            round(monthly, 2), round(annual_spend, 2),
-            contribution_hint, spend_hint, meta)
+            round(monthly, 2), contribution_hint, meta)
 
 
 # ── Recompute: BANs + charts ─────────────────────────────────────────────────────
@@ -290,16 +300,16 @@ def seed_defaults(config_data, txn_json):
     Output("fc-projection-chart", "figure"),
     Output("fc-donut-chart", "figure"),
     Output("fc-insight", "children"),
-    Input("fc-current-age", "value"),
+    Input("fc-current-age", "data"),
     Input("fc-coast-age", "value"),
-    Input("fc-retirement-age", "value"),
+    Input("fc-retirement-age", "data"),
     Input("fc-monthly-contribution", "value"),
     Input("fc-real-return", "value"),
-    Input("fc-annual-spend", "value"),
     Input("config-store", "data"),
+    Input("retirement-goal-store", "data"),
 )
 def recompute(current_age, coast_age, retirement_age, monthly_contribution,
-              real_return, annual_spend, config_data):
+              real_return, config_data, goal_store):
     uid = session.get("user_id")
     if not uid:
         raise dash.exceptions.PreventUpdate
@@ -315,27 +325,36 @@ def recompute(current_age, coast_age, retirement_age, monthly_contribution,
     your_monthly = float(monthly_contribution or 0)
     annual_contribution = your_monthly * 12
     real_return = float(real_return or 0) / 100.0
-    annual_spend = float(annual_spend or 0)
     current_age, coast_age, retirement_age = int(current_age), int(coast_age), int(retirement_age)
 
+    # Nest-egg goal: the Retirement page's tuned value when it matches this view,
+    # else the from-config default. Forecast no longer derives goal from spend/4%.
+    goal, goal_source = _resolve_goal(goal_store, uid, retirement_age, config_data)
+
+    # Accumulation only — truncate at retirement age. The drawdown (and whether the
+    # nest egg lasts) is the Retirement page's job; Forecast plots the climb to it.
     df = project_portfolio(
         start_value=start_value,
         current_age=current_age,
         coast_age=coast_age,
         retirement_age=retirement_age,
-        horizon_age=_HORIZON_AGE,
+        horizon_age=retirement_age,
         annual_contribution=annual_contribution,
         real_return=real_return,
     )
     s = forecast_summary(
-        df, annual_spend=annual_spend, real_return=real_return, start_value=start_value,
+        df, retirement_goal=goal, real_return=real_return, start_value=start_value,
         current_age=current_age, coast_age=coast_age, retirement_age=retirement_age,
     )
 
     # ── BANs: goal → coast target → on-track → required lever ────────────────────
+    goal_sub = (
+        f"from your Retirement plan · at age {retirement_age}"
+        if goal_source == "tuned"
+        else "estimated from your plan · refine on the Retirement page"
+    )
     ban_goal = _ban_card(
-        "Retirement nest egg goal", _money(s["retirement_goal"]),
-        f"{_money(annual_spend)}/yr ÷ {SWR:.0%} at age {retirement_age}",
+        "Retirement nest egg goal", _money(s["retirement_goal"]), goal_sub,
     )
 
     ban_coast_target = _ban_card(
@@ -382,10 +401,13 @@ def recompute(current_age, coast_age, retirement_age, monthly_contribution,
 # ── Figure builders ──────────────────────────────────────────────────────────────
 
 def _validation_message(current_age, coast_age, retirement_age):
-    if None in (current_age, coast_age, retirement_age):
-        return "Enter current, coast, and retirement ages."
+    if current_age is None or retirement_age is None:
+        return "Add your birth date and retirement age on the Profile page."
+    if coast_age is None:
+        return "Enter a coast age."
     if not (current_age <= coast_age <= retirement_age <= _HORIZON_AGE):
-        return f"Ages must satisfy current ≤ coast ≤ retirement ≤ {_HORIZON_AGE}."
+        return (f"Coast age must be between your current age ({current_age}) and "
+                f"retirement age ({retirement_age}).")
     return None
 
 
@@ -435,10 +457,6 @@ def _projection_figure(df, retirement_goal, coast_target, coast_age,
                   layer="below", line_width=0, annotation_text="Coast",
                   annotation_position="top left",
                   annotation_font=dict(size=10, color="#3a9d5d"))
-    fig.add_vrect(x0=retirement_age, x1=ages[-1], fillcolor=_C_TARGET, opacity=0.06,
-                  layer="below", line_width=0, annotation_text="Retirement · 4% draw",
-                  annotation_position="top left",
-                  annotation_font=dict(size=10, color="#b9791b"))
 
     # Retirement nest egg goal — horizontal line (the target AT retirement).
     fig.add_hline(y=retirement_goal, line_dash="dash", line_color=_C_TARGET, line_width=1.5,
@@ -574,9 +592,9 @@ def render_asset_class_chart(store):
     Output("fc-fan-chart", "figure"),
     Output("fc-fan-caption", "children"),
     Input("fc-returns-store", "data"),
-    Input("fc-current-age", "value"),
+    Input("fc-current-age", "data"),
     Input("fc-coast-age", "value"),
-    Input("fc-retirement-age", "value"),
+    Input("fc-retirement-age", "data"),
     Input("fc-monthly-contribution", "value"),
 )
 def render_fan_chart(store, current_age, coast_age, retirement_age, monthly_contribution):
