@@ -257,6 +257,35 @@ def save_transaction_account_config(owner_docs: dict, assignments: dict):
         )
 
 
+# Profile fields persisted on users/{uid} (see core/models/session.py UserConfig
+# and the Profile page). Only these keys are writable through save_user_profile.
+PROFILE_FIELDS = (
+    "birth_date",
+    "coast_age",
+    "retirement_age",
+    "claim_age",
+    "death_age",
+    "income_growth_rate",
+    "income_segments",
+)
+
+
+def save_user_profile(uid: str, payload: dict) -> None:
+    """Persist Profile demographics + income to users/{uid} (merge).
+
+    Only keys in ``PROFILE_FIELDS`` are written; everything else is ignored so a
+    callback can hand over a wider dict without clobbering unrelated config. Keys
+    mapping to ``None`` are skipped (left unchanged) rather than written as null.
+    """
+    data = {
+        k: payload[k]
+        for k in PROFILE_FIELDS
+        if k in payload and payload[k] is not None
+    }
+    if data:
+        db.collection("users").document(uid).set(data, merge=True)
+
+
 def update_firestore_transactions(
         collection_str: str,
         uid: str,

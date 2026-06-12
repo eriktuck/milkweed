@@ -1146,6 +1146,67 @@ def calculate_social_security_benefit(earnings: pd.Series, claim_age: int) -> fl
 
     return round(benefit, 2)
 
+
+def segments_to_annual_income(
+    segments: list[dict],
+    thru_year: int | None = None,
+    growth_rate: float = 0.03,
+) -> pd.Series:
+    """Convert forward-filled income segments to an annual gross-income Series.
+
+    Each segment is ``{"date": "YYYY-MM-DD", "amount": <annual gross income>}``:
+    ``amount`` is the annual income *rate* in effect from ``date``, held flat
+    (forward-filled) until the next segment's date. The rate is integrated at
+    monthly grain so a segment starting mid-year contributes only its active
+    months (e.g. a raise on 2024-07-01 splits 2024 between the old and new rate).
+
+    Parameters
+    ----------
+    segments : list[dict]
+        Income segments. Order-independent; empty → empty Series.
+    thru_year : int | None
+        If given and greater than the last segment's year, the series is extended
+        through ``thru_year`` by growing the last segment's rate at ``growth_rate``
+        per year (projection). If None, the series stops at the last segment year.
+    growth_rate : float
+        Real annual income growth applied to the projected tail (default 0.03).
+
+    Returns
+    -------
+    pd.Series
+        Gross income per calendar year, indexed by integer year (sorted).
+    """
+    if not segments:
+        return pd.Series(dtype=float)
+
+    seg = sorted(segments, key=lambda s: s["date"])
+    dates = pd.to_datetime([s["date"] for s in seg])
+    amounts = [float(s["amount"]) for s in seg]
+    last_seg_year = int(dates[-1].year)
+
+    # Forward-fill the annual rate at monthly grain from the first segment month
+    # through December of the last segment's year, then integrate by year.
+    months = pd.date_range(
+        dates[0].to_period("M").to_timestamp(),
+        pd.Timestamp(year=last_seg_year, month=12, day=1),
+        freq="MS",
+    )
+    rate = pd.Series(index=months, dtype=float)
+    for d, a in zip(dates, amounts):
+        rate.loc[rate.index >= d.to_period("M").to_timestamp()] = a
+
+    annual = (rate / 12.0).groupby(rate.index.year).sum()
+
+    # Project beyond the last segment year by compounding the last rate.
+    if thru_year is not None and thru_year > last_seg_year:
+        base = amounts[-1]
+        for i, year in enumerate(range(last_seg_year + 1, thru_year + 1), start=1):
+            annual.loc[year] = base * ((1 + growth_rate) ** i)
+
+    annual.index = annual.index.astype(int)
+    return annual.sort_index()
+
+
 def calculate_married_joint_tax(income):
     """
     Calculate federal income tax for a married couple filing jointly in 2024.

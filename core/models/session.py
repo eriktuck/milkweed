@@ -92,6 +92,22 @@ class UserConfig(BaseModel):
     # Retirement-page planning assumptions (spec-retirement.md, Phase 2).
     # Absent → service defaults apply; no migration needed (see RetirementConfig).
     retirement: RetirementConfig | None = None
+    # ── User Profile (retirement modelling background data) ──
+    # All optional; absent → functional defaults supplied by the model/UI layer.
+    # Edited on the Profile page (pages/profile.py).
+    # NOTE: birth_year/retirement_age/claim_age/death_age also exist on the
+    # `retirement` block above (added in parallel) — see overlap to reconcile.
+    birth_date: str | None = None              # ISO "YYYY-MM-DD"; birth_year = year part
+    coast_age: int | None = None               # default 50; must be < retirement_age
+    retirement_age: int | None = None          # default 67
+    claim_age: int | None = None               # default 70; Social Security claim, 62–70
+    death_age: int | None = None               # default 90; planning horizon
+    income_growth_rate: float | None = None    # real annual income growth; default 0.03
+    # Gross-income history as forward-filled segments. Each entry is
+    # {"date": "YYYY-MM-DD", "amount": <annual gross income>}: the amount is the
+    # annual rate in effect from `date` until the next segment. A future-dated
+    # segment models a planned raise. See core.utils.functions.segments_to_annual_income.
+    income_segments: List[dict] | None = None
 
 
 class HouseholdConfig(UserConfig):
