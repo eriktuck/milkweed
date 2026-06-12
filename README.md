@@ -40,8 +40,36 @@ Milkweed is designed to be self-hosted. You will own your data completely.
 
 ### Prerequisites
 
+**Accounts & services**
+
 - A Google Cloud Platform (GCP) Account.
-- `gcloud CLI` installed on your machine.
+- A Firebase project (Authentication + Cloud Firestore enabled).
+- A [Monarch Money](https://www.monarchmoney.com/) account (for transaction import).
+
+**Local toolchain**
+
+| Tool | Purpose | Install (macOS / Homebrew) |
+|------|---------|----------------------------|
+| [`uv`](https://docs.astral.sh/uv/) | Python dependency management; also provisions a managed Python ≥3.10 | `brew install uv` |
+| Firebase CLI | Running the local Firestore emulator | `npm install -g firebase-tools` |
+| `gcloud CLI` | Deploying to Cloud Run | `brew install --cask gcloud-cli` |
+| Node.js + npm | Host for the Firebase CLI | `brew install node` |
+| Docker Desktop | Optional — running the app via `docker compose` | `brew install --cask docker-desktop` |
+
+> On non-macOS platforms, use the equivalent installer for each tool (e.g. the standalone Firebase CLI binary, the Google Cloud SDK installer, and Docker Desktop / Docker Engine).
+
+**Credentials**
+
+Create a `secrets/` directory (gitignored) containing an `env-file` with your Firebase config and other secrets, plus a service-account JSON for Firestore access. See `CLAUDE.md` for the full list of required environment variables and the emulator-specific `env-file.dev` variant.
+
+After installing, sync dependencies and authenticate:
+
+```bash
+uv sync                                  # install Python deps into a managed venv
+gcloud auth login                        # for deploys
+gcloud auth application-default login    # for local Application Default Credentials
+firebase login                           # for the Firestore emulator
+```
 
 ### Quick Start Overview
 
@@ -56,6 +84,47 @@ Milkweed is designed to be self-hosted. You will own your data completely.
   - Deploy the service to **Google Cloud Run**.
   - Set your environment variables (Firebase config keys) in the Cloud Run console.
 - **Run:** Open the URL provided by Cloud Run, create an account, and start building your Conscious Spending Plan.
+
+### Run Locally
+
+Once the [prerequisites](#prerequisites) are installed and your `secrets/` directory is in place, you can run the app on your machine. The recommended workflow uses the **Firebase emulator** so you never read or write production data.
+
+**Against the Firebase emulator (recommended — no prod writes):**
+
+```bash
+# Terminal 1 — start the emulator (Firestore on :8090, emulator UI on :4000)
+firebase emulators:start --import=./emulator-data --export-on-exit
+
+# Terminal 2 — run the app against the emulator
+ENV_PATH=secrets/env-file.dev uv run python app.py
+```
+
+The first time, seed the emulator from prod (with the emulator already running, before launching the app):
+
+```bash
+uv run python -m scripts.seed_emulator                          # transactions from 2025-01-01
+uv run python -m scripts.seed_emulator --start-date 2024-01-01  # wider range
+firebase emulators:export ./emulator-data                       # persist for next session
+```
+
+> **Note:** Auth is not emulated — login still uses your real Firebase credentials. Only Firestore reads/writes are redirected to the emulator (automatically, when `FIRESTORE_EMULATOR_HOST` is set in `env-file.dev`).
+
+**Against production (writes to real Firestore):**
+
+```bash
+python app.py
+```
+
+**With Docker Compose:**
+
+```bash
+firebase emulators:start                   # terminal 1 (emulator)
+docker compose --profile dev up --build    # terminal 2 (app against emulator)
+
+docker compose --profile prod up --build   # or, mirror Cloud Run against prod
+```
+
+The app is served at `http://localhost:8080`.
 
 ## Roadmap
 
