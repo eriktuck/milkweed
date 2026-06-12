@@ -356,6 +356,59 @@ def annual_spend_by_phase(
     return out
 
 
+# ── Household shared expenses → per-individual share (only individuals "retire") ──
+#
+# Shared household costs are paid from the joint account, so they never appear in a
+# member's own CSP plan — the member's plan records only the *transfer* that funds
+# them, as a `joint_contribution` line. To plan one individual's retirement we fold
+# in their proportional share of the real household expenses, distributed by how
+# much each member contributes (their `joint_contribution`), not an even split: the
+# person who funds 60% of the joint account bears 60% of the shared costs.
+
+def household_expense_share(member_contributions: dict[str, float], uid: str) -> float:
+    """Fraction of shared household expenses borne by member `uid`.
+
+    = the member's joint contribution ÷ the sum of all members' joint
+    contributions. Contributions come from each member's *latest* CSP plan — a
+    single scalar projected forward (the most recent plan is the representative
+    one for a forward-looking projection), deliberately not a time average. A
+    member who contributes nothing bears no share (0.0); a zero household total
+    likewise yields 0.0. Pure.
+    """
+    total = sum(max(float(v), 0.0) for v in member_contributions.values())
+    if total <= 0:
+        return 0.0
+    return max(float(member_contributions.get(uid, 0.0)), 0.0) / total
+
+
+def merge_household_expenses(
+    individual_plan: dict | None,
+    household_plan: dict | None,
+    share: float,
+) -> dict:
+    """Fold an individual's `share` of the household CSP plan into their own plan.
+
+    Returns a new monthly {csp_key: amount} map: the individual's own plan plus
+    `share` × the household amount for each key. The individual's
+    `joint_contribution` line (the transfer that *funded* the share) and the
+    household's own income/contribution lines ride along unchanged — downstream
+    `annual_spend_by_phase` drops them — so replacing the transfer with the real
+    expense share does not double-count. With no household (share 0 or empty plan)
+    the individual's plan is returned unchanged. Pure.
+
+    Linearity note: because phase multipliers are per-key, running
+    `annual_spend_by_phase` on this merged plan equals scaling the household's
+    spend-by-phase by `share` and adding it to the individual's — they share the
+    same per-key factor — so merging here keeps one editable row per category
+    without changing the math.
+    """
+    merged = {k: float(v) for k, v in (individual_plan or {}).items()}
+    if share:
+        for key, amount in (household_plan or {}).items():
+            merged[key] = merged.get(key, 0.0) + share * float(amount)
+    return merged
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # 6. Data-derived inputs  (edge — reads the holdings snapshot)
 # ════════════════════════════════════════════════════════════════════════════
