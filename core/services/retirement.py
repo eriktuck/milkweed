@@ -536,16 +536,22 @@ def project_balances_to_retirement(
     `current_balances` / `annual_allocation` are {taxable, trad, roth} dicts.
     Returns {taxable, trad, roth, total} projected at retirement. With years ≤ 0
     (already at/after retirement) the projection is just the current balances.
+
+    Thin wrapper over the shared `simulate_lifetime` engine (accumulation slice):
+    runs an all-working window of `years` and reads the balances entering
+    retirement. The recurrence is identical, so the result is unchanged.
     """
-    r = float(real_return)
+    from core.services.projection import simulate_lifetime
+
     n = max(int(years), 0)
-    out: dict = {}
-    for bucket in ("taxable", "trad", "roth"):
-        v = float(current_balances.get(bucket, 0.0))
-        a = float(annual_allocation.get(bucket, 0.0))
-        for _ in range(n):
-            v = v * (1 + r) + a
-        out[bucket] = v
+    df = simulate_lifetime(
+        buckets=current_balances, allocation=annual_allocation,
+        current_age=0, coast_age=n, retirement_age=n, death_age=n,
+        spend_by_phase={}, slow_go_age=n, no_go_age=n,
+        r_accum=real_return, r_retire=real_return,
+    )
+    row = df.loc[n]
+    out = {b: float(row[b]) for b in ("taxable", "trad", "roth")}
     out["total"] = out["taxable"] + out["trad"] + out["roth"]
     return out
 
@@ -923,64 +929,29 @@ def project_retirement_taxaware(
 
     `total` is the portfolio entering each age-year (before that year's draw).
     All flows are positive magnitudes; the UI negates draws for display.
+
+    Thin wrapper over the shared `simulate_lifetime` engine (retirement slice):
+    with no accumulation window (current_age = coast_age = retirement_age) the
+    engine runs only the tax-aware drawdown, byte-identical to the original loop.
+    The engine's `spend_phase` column is the `phase` returned here.
     """
-    r = float(real_return)
-    ss = _as_age_lookup(ss_by_age)
-    health = _as_age_lookup(healthcare_by_age)
-    gain_frac = float(taxable_gain_fraction)
+    from core.services.projection import simulate_lifetime
 
-    taxable = float(balances.get("taxable", 0.0))
-    trad = float(balances.get("trad", 0.0))
-    roth = float(balances.get("roth", 0.0))
-
-    rows = []
-    for age in range(int(retirement_age), int(death_age) + 1):
-        phase = phase_for_age(age, slow_go_age, no_go_age)
-        spend = float(spend_by_phase.get(phase, 0.0))
-        hc = health.get(age, 0.0)
-        income = ss.get(age, 0.0)
-        total_before = taxable + trad + roth
-
-        cash_need = max(spend + hc - income, 0.0)   # SS untaxed offset (v1)
-        rmd = required_min_distribution(trad, age, rmd_start)
-
-        # Fixed-point on tax: the draw must fund cash_need + the tax it triggers.
-        tax = 0.0
-        w_taxable = w_trad = w_roth = excess_rmd = 0.0
-        for _ in range(8):
-            target = cash_need + tax
-            w_taxable, w_trad, w_roth, excess_rmd, _short = _allocate_withdrawals(
-                target, taxable, trad, roth, rmd)
-            ordinary_income = w_trad                 # all trad draws are ordinary
-            ltcg_gain = w_taxable * gain_frac
-            new_tax = annual_tax(ordinary_income, ltcg_gain)
-            if abs(new_tax - tax) < 1.0:
-                tax = new_tax
-                break
-            tax = new_tax
-
-        withdrawal = w_taxable + w_trad + w_roth
-        net_spend = withdrawal - tax - excess_rmd + income   # after-tax living cash
-
-        rows.append({
-            "age": age, "total": total_before,
-            "taxable": taxable, "trad": trad, "roth": roth,
-            "spend": spend, "healthcare": hc, "income": income, "rmd": rmd,
-            "withdrawal": withdrawal, "w_taxable": w_taxable, "w_trad": w_trad,
-            "w_roth": w_roth, "ordinary_income": ordinary_income,
-            "ltcg_gain": ltcg_gain, "tax": tax, "net_spend": net_spend,
-            "phase": phase,
-        })
-
-        # Apply draws; reinvest any forced-RMD excess into taxable; then grow.
-        taxable = max(taxable - w_taxable + excess_rmd, 0.0)
-        trad = max(trad - w_trad, 0.0)
-        roth = max(roth - w_roth, 0.0)
-        taxable *= (1 + r)
-        trad *= (1 + r)
-        roth *= (1 + r)
-
-    return pd.DataFrame(rows).set_index("age")
+    df = simulate_lifetime(
+        buckets=balances, allocation={},
+        current_age=retirement_age, coast_age=retirement_age,
+        retirement_age=retirement_age, death_age=death_age,
+        spend_by_phase=spend_by_phase, slow_go_age=slow_go_age, no_go_age=no_go_age,
+        r_accum=real_return, r_retire=real_return,
+        ss_by_age=ss_by_age, healthcare_by_age=healthcare_by_age,
+        rmd_start=rmd_start, gain_fraction=taxable_gain_fraction,
+    )
+    out = df.rename(columns={"spend_phase": "phase"})
+    return out[[
+        "total", "taxable", "trad", "roth", "spend", "healthcare", "income",
+        "rmd", "withdrawal", "w_taxable", "w_trad", "w_roth", "ordinary_income",
+        "ltcg_gain", "tax", "net_spend", "phase",
+    ]]
 
 
 def healthcare_costs_by_age(
