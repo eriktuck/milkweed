@@ -43,6 +43,11 @@ def protected_layout():
         # Investments page + Settings inv-table (refresh on upload) — mounted
         # globally so both pages can reach it.
         dcc.Store(id='investments-data-version', data=0),
+        # The nest-egg goal handshake: written by the Retirement page (the precise
+        # backward-from-spending PV) and consumed by the Forecast page as its goal,
+        # replacing Forecast's crude annual_spend/4% estimate. Mounted globally so
+        # both pages can reach it; session-scoped so it survives navigation.
+        dcc.Store(id='retirement-goal-store', storage_type="session"),
     ])
 
 app.layout = protected_layout

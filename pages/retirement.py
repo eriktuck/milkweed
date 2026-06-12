@@ -943,6 +943,7 @@ def estimate_ss(gross_income, employment_type, career_years, config_data, use_ca
     Output("ret-cashflow-chart", "figure"),
     Output("ret-income-summary", "children"),
     Output("ret-projection-store", "data"),
+    Output("retirement-goal-store", "data"),
     Input("ret-retirement-age", "value"),
     Input("ret-death-age", "value"),
     Input("ret-slow-go-age", "value"),
@@ -977,7 +978,7 @@ def recompute(retirement_age, death_age, slow_go_age, no_go_age, real_return,
         blank = _ban_card("—", "—", "")
         empty = _empty_figure(msg)
         return (blank, blank, blank, blank, empty, "", _empty_figure(""), "", "", "",
-                _empty_figure(""), "", None)
+                _empty_figure(""), "", None, None)
 
     retirement_age = int(retirement_age)
     death_age = int(death_age)
@@ -1118,8 +1119,23 @@ def recompute(retirement_age, death_age, slow_go_age, no_go_age, real_return,
         "tax_aware": tax_aware,
     }
 
+    # ── Nest-egg goal handshake → Forecast page ──────────────────────────────────
+    # The precise backward-from-spending goal (PV of net spend − SS, discounted at
+    # the retirement real return). Forecast consumes this in place of its crude
+    # annual_spend/4% estimate; we ship the assumptions it was computed under so
+    # Forecast can flag a stale mismatch (different retirement age / return).
+    goal_store = {
+        "nest_egg_goal": float(max(goal, 0.0)),
+        "ss_covers": bool(ss_covers),
+        "retirement_age": retirement_age,
+        "real_return": r,
+        "death_age": death_age,
+        "uid": uid,
+    }
+
     return (ban_goal, ban_avg, ban_first, ban_remaining, fig, insight,
-            glide, glide_note, totals, note, cashflow, income_summary, proj_store)
+            glide, glide_note, totals, note, cashflow, income_summary, proj_store,
+            goal_store)
 
 
 # ── Figure builders ──────────────────────────────────────────────────────────────
