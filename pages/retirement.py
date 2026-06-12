@@ -27,6 +27,7 @@ from dash import Input, Output, State, callback, dash_table, dcc, html
 from flask import session
 
 import core.utils.functions as functions
+from core.services.firebase import save_retirement_config, save_user_profile
 from core.services.forecast import default_monthly_contribution
 from core.services.investments import fetch_latest_holdings
 from core.services.returns import (
@@ -153,6 +154,13 @@ _input_bar = dbc.Card(dbc.CardBody(dbc.Row([
         ], size="sm"),
         html.Small("inflation-adjusted", className="text-muted"),
     ], width="auto"),
+    # Lock-in: edits above are a live scratchpad (shared with Forecast this session
+    # via the goal-store); Save commits them to your saved plan in Firestore.
+    dbc.Col([
+        dbc.Button("Save assumptions", id="ret-save-assumptions",
+                   color="primary", size="sm"),
+        html.Div(id="ret-save-status", className="small mt-1"),
+    ], width="auto", className="ms-auto d-flex flex-column align-items-end justify-content-end"),
 ], className="g-3 align-items-end")), className="mb-3")
 
 
@@ -1158,6 +1166,68 @@ def publish_goal(goal_local):
     if goal_local is None:
         raise dash.exceptions.PreventUpdate
     return goal_local
+
+
+# ── Lock in the assumptions header → Firestore (cross-session) ────────────────────
+# The header is a live scratchpad: edits flow to Forecast this session via the
+# goal-store, but reset to the saved plan on reload. Save commits them — Profile-owned
+# demographics (retirement/death/claim age) through save_user_profile and the
+# Retirement-owned scenario knobs (slow-go/no-go age, real return) through
+# save_retirement_config — then mirrors both into config-store so the page (and
+# other pages) reflect them without a reload. Mirrors pages/profile.py save_demographics.
+@callback(
+    Output("config-store", "data", allow_duplicate=True),
+    Output("ret-save-status", "children"),
+    Input("ret-save-assumptions", "n_clicks"),
+    State("ret-retirement-age", "value"),
+    State("ret-death-age", "value"),
+    State("ret-claim-age", "value"),
+    State("ret-slow-go-age", "value"),
+    State("ret-no-go-age", "value"),
+    State("ret-real-return", "value"),
+    State("config-store", "data"),
+    State("use-case", "value"),
+    prevent_initial_call=True,
+)
+def save_assumptions(n, retirement_age, death_age, claim_age, slow_go_age,
+                     no_go_age, real_return, config_data, use_case):
+    if not n:
+        raise dash.exceptions.PreventUpdate
+    uid = _selected_uid(use_case)
+    if not uid or not config_data:
+        raise dash.exceptions.PreventUpdate
+
+    msg = _validation_message(retirement_age, death_age, slow_go_age, no_go_age)
+    if msg:
+        return dash.no_update, dbc.Alert(msg, color="danger", className="py-1 mb-0")
+
+    # Profile-owned demographics (top-level users/{uid}). claim_age is edited in this
+    # header too; coast_age / birth_date aren't on this page, so they're left as-is.
+    profile = {
+        "retirement_age": int(retirement_age),
+        "death_age": int(death_age),
+        "claim_age": int(claim_age) if claim_age is not None else None,
+    }
+    # Scenario knobs (users/{uid}.retirement). real_return is stored as a fraction;
+    # the header shows it as a percent.
+    retirement = {
+        "slow_go_age": int(slow_go_age),
+        "no_go_age": int(no_go_age),
+        "real_return": float(real_return) / 100.0 if real_return is not None else None,
+    }
+    save_user_profile(uid, profile)
+    save_retirement_config(uid, retirement)
+
+    # Mirror the writes into config-store so the in-session view matches Firestore.
+    cfg = json.loads(config_data)
+    user_cfg = cfg.setdefault("users", {}).setdefault(uid, {})
+    user_cfg.update({k: v for k, v in profile.items() if v is not None})
+    ret_cfg = user_cfg.get("retirement")
+    if not isinstance(ret_cfg, dict):
+        ret_cfg = {}
+        user_cfg["retirement"] = ret_cfg
+    ret_cfg.update({k: v for k, v in retirement.items() if v is not None})
+    return json.dumps(cfg), dbc.Alert("Saved.", color="success", className="py-1 mb-0")
 
 
 # ── Figure builders ──────────────────────────────────────────────────────────────

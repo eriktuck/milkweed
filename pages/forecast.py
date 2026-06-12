@@ -290,8 +290,9 @@ layout = html.Div([
     Output("fc-bucket-balances", "children"),
     Input("config-store", "data"),
     State("transaction-data-store", "data"),
+    State("retirement-goal-store", "data"),
 )
-def seed_defaults(config_data, txn_json):
+def seed_defaults(config_data, txn_json, goal_store):
     if not config_data or not isinstance(config_data, str):
         raise dash.exceptions.PreventUpdate
 
@@ -307,6 +308,15 @@ def seed_defaults(config_data, txn_json):
     current_age = _age_from_birth_date(user_cfg.get("birth_date")) or _DEFAULT_CURRENT_AGE
     coast_age = user_cfg.get("coast_age") or _DEFAULT_COAST_AGE
     retirement_age = user_cfg.get("retirement_age") or _DEFAULT_RETIREMENT_AGE
+
+    # A live (unsaved) scenario from the Retirement page wins for this session, so
+    # the climb-to-goal here honors the retirement age you just tuned there — and
+    # _resolve_goal then matches its retirement age and adopts the tuned goal rather
+    # than rejecting it as stale. Saved scenarios already flow through user_cfg
+    # above; this covers the scratchpad case before you lock one in.
+    if (isinstance(goal_store, dict) and goal_store.get("uid") == uid
+            and goal_store.get("retirement_age") is not None):
+        retirement_age = int(goal_store["retirement_age"])
 
     csp_labels = user_cfg.get("csp_labels") or {}
     csp_plans = user_cfg.get("csp_plans") or {}

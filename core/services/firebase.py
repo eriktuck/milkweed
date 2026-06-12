@@ -286,6 +286,34 @@ def save_user_profile(uid: str, payload: dict) -> None:
         db.collection("users").document(uid).set(data, merge=True)
 
 
+# Retirement scenario knobs persisted under users/{uid}.retirement (see
+# core/models/session.py RetirementConfig). Demographics (retirement_age/
+# death_age/claim_age) are Profile-owned and saved via save_user_profile; these
+# are the Retirement page's own assumption knobs.
+RETIREMENT_FIELDS = (
+    "slow_go_age",
+    "no_go_age",
+    "real_return",
+    "withdrawal_rate",
+)
+
+
+def save_retirement_config(uid: str, payload: dict) -> None:
+    """Persist Retirement scenario knobs to users/{uid}.retirement (merge).
+
+    Only keys in ``RETIREMENT_FIELDS`` are written; None values are skipped. The
+    fields are nested under ``retirement`` and written with merge so they round-trip
+    through RetirementConfig and sibling keys (e.g. phase_factors) are untouched.
+    """
+    data = {
+        k: payload[k]
+        for k in RETIREMENT_FIELDS
+        if k in payload and payload[k] is not None
+    }
+    if data:
+        db.collection("users").document(uid).set({"retirement": data}, merge=True)
+
+
 def update_firestore_transactions(
         collection_str: str,
         uid: str,
