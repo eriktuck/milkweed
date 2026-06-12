@@ -7,6 +7,7 @@ callbacks only.
 """
 
 import json
+from datetime import date
 
 import dash
 import dash_bootstrap_components as dbc
@@ -52,6 +53,12 @@ _C_INFLATION = "#ef4444"   # red — inflation line
 
 _HORIZON_AGE = 90          # planning horizon (fixed in v1; Concept B has no input)
 
+# Fallback ages used only when the user has no saved Profile value (the Profile
+# page is the source of truth for demographics; see seed_defaults).
+_DEFAULT_CURRENT_AGE = 40
+_DEFAULT_COAST_AGE = 50
+_DEFAULT_RETIREMENT_AGE = 65
+
 _CHART_LAYOUT = dict(
     paper_bgcolor="white",
     plot_bgcolor="white",
@@ -72,6 +79,18 @@ def _money(v: float) -> str:
     return f"${v:,.0f}"
 
 
+def _age_from_birth_date(birth_date) -> int | None:
+    """Current age (whole years) from an ISO birth date, or None if unparseable."""
+    if not birth_date:
+        return None
+    try:
+        b = date.fromisoformat(str(birth_date)[:10])
+    except ValueError:
+        return None
+    today = date.today()
+    return today.year - b.year - ((today.month, today.day) < (b.month, b.day))
+
+
 def _ban_card(label: str, value: str, subtitle, value_class: str = "") -> dbc.Card:
     return dbc.Card(dbc.CardBody([
         html.P(label, className="text-muted small mb-1"),
@@ -89,15 +108,15 @@ def _num_input(id_, value, **kw):
 _input_bar = dbc.Card(dbc.CardBody(dbc.Row([
     dbc.Col([
         dbc.Label("Current age", className="small text-muted mb-1"),
-        _num_input("fc-current-age", 40, min=18, max=100, step=1),
+        _num_input("fc-current-age", _DEFAULT_CURRENT_AGE, min=18, max=100, step=1),
     ], width="auto"),
     dbc.Col([
         dbc.Label("Coast age", className="small text-muted mb-1"),
-        _num_input("fc-coast-age", 50, min=18, max=100, step=1),
+        _num_input("fc-coast-age", _DEFAULT_COAST_AGE, min=18, max=100, step=1),
     ], width="auto"),
     dbc.Col([
         dbc.Label("Retirement age", className="small text-muted mb-1"),
-        _num_input("fc-retirement-age", 65, min=40, max=100, step=1),
+        _num_input("fc-retirement-age", _DEFAULT_RETIREMENT_AGE, min=40, max=100, step=1),
     ], width="auto"),
     dbc.Col([
         dbc.Label("Monthly contribution", className="small text-muted mb-1"),
@@ -197,6 +216,9 @@ layout = html.Div([
 # ── Defaults: seed contribution + spend from CSP plan & holdings ────────────────
 
 @callback(
+    Output("fc-current-age", "value"),
+    Output("fc-coast-age", "value"),
+    Output("fc-retirement-age", "value"),
     Output("fc-monthly-contribution", "value"),
     Output("fc-annual-spend", "value"),
     Output("fc-contribution-hint", "children"),
@@ -215,6 +237,13 @@ def seed_defaults(config_data, txn_json):
 
     config = json.loads(config_data)
     user_cfg = config.get("users", {}).get(uid, {})
+
+    # Ages default from the saved Profile (the source of truth for demographics);
+    # fall back to the page defaults when the user has no Profile value yet.
+    current_age = _age_from_birth_date(user_cfg.get("birth_date")) or _DEFAULT_CURRENT_AGE
+    coast_age = user_cfg.get("coast_age") or _DEFAULT_COAST_AGE
+    retirement_age = user_cfg.get("retirement_age") or _DEFAULT_RETIREMENT_AGE
+
     csp_labels = user_cfg.get("csp_labels") or {}
     csp_plans = user_cfg.get("csp_plans") or {}
     active_plan = functions.get_active_csp_plan(csp_plans) or user_cfg.get("csp_plan") or {}
@@ -246,7 +275,9 @@ def seed_defaults(config_data, txn_json):
         "No holdings found — upload a Vanguard CSV on the Investments page"
     )
 
-    return round(monthly, 2), round(annual_spend, 2), contribution_hint, spend_hint, meta
+    return (current_age, coast_age, retirement_age,
+            round(monthly, 2), round(annual_spend, 2),
+            contribution_hint, spend_hint, meta)
 
 
 # ── Recompute: BANs + charts ─────────────────────────────────────────────────────
