@@ -7,6 +7,7 @@ income-growth rate. The income timeline previews actual vs projected income
 through the coast year. See .planning/SPEC-profile.md.
 """
 
+import base64
 import json
 from datetime import date
 
@@ -18,7 +19,7 @@ from dash.exceptions import PreventUpdate
 from flask import session
 
 from core.services.firebase import save_user_profile
-from core.utils.functions import segments_to_annual_income
+from core.utils.functions import segments_to_annual_income, ssa_earnings_to_segments
 
 dash.register_page(__name__, path="/profile")
 
@@ -181,6 +182,13 @@ _demographics_card = dbc.Card([
 ], className="mb-4")
 
 
+_SSA_DROPZONE_STYLE = {
+    "border": "1px dashed #555",
+    "borderRadius": "6px",
+    "cursor": "pointer",
+}
+
+
 _income_card = dbc.Card([
     dbc.CardHeader([
         html.H5("Gross income", className="mb-1"),
@@ -192,6 +200,30 @@ _income_card = dbc.Card([
         ),
     ]),
     dbc.CardBody([
+        dbc.Alert([
+            html.Div([
+                html.I(className="fas fa-circle-info me-2"),
+                html.Strong("Import your Social Security earnings history. "),
+                "Download your earnings record from ",
+                html.A("ssa.gov/myaccount", href="https://www.ssa.gov/myaccount/",
+                       target="_blank"),
+                " as a CSV (columns: Work Year, Taxed Social Security Earnings, "
+                "Taxed Medicare Earnings) and drop it below. Each year becomes a "
+                "Jan 1 income period — overwriting the rows below.",
+            ], className="small mb-2"),
+            dcc.Upload(
+                id="profile-ssa-upload",
+                children=html.Div([
+                    html.I(className="fas fa-file-upload me-2"),
+                    "Drag & drop your SSA earnings CSV or ",
+                    html.A("browse", style={"cursor": "pointer"}),
+                ], className="text-center py-3"),
+                style=_SSA_DROPZONE_STYLE,
+                accept=".csv",
+                multiple=False,
+            ),
+            html.Div(id="profile-ssa-status", className="mt-2 small"),
+        ], color="light", className="border"),
         dbc.Row(
             _labeled("Income growth (real, applied after the last row)",
                      dbc.InputGroup([
@@ -402,4 +434,60 @@ def save_income(n, dates, amounts, growth_pct, config_data):
 
     status = dbc.Alert(f"Saved {len(segments)} income period(s).", color="success",
                        className="py-1 mb-0")
+    return json.dumps(cfg), status, segments
+
+
+@callback(
+    Output("config-store", "data", allow_duplicate=True),
+    Output("profile-ssa-status", "children"),
+    Output("profile-segments-store", "data", allow_duplicate=True),
+    Input("profile-ssa-upload", "contents"),
+    State("config-store", "data"),
+    prevent_initial_call=True,
+)
+def import_ssa_earnings(contents, config_data):
+    """Parse an uploaded SSA earnings record into income segments and overwrite the
+    user's income history (each year → a Jan 1 segment).
+
+    Existing segments dated *after* the end of the upload's last year are kept —
+    those are forward-looking edits (a planned raise / new job) the earnings record
+    can't know about. E.g. importing a record ending in 2025 preserves a 2026-02-01
+    entry but replaces everything through 2025-12-31.
+    """
+    if not contents:
+        raise PreventUpdate
+    cfg, uid, existing_cfg = _user_cfg(config_data)
+    if not uid:
+        raise PreventUpdate
+
+    try:
+        _, b64 = contents.split(",", 1)
+        csv_text = base64.b64decode(b64).decode("utf-8")
+    except Exception:
+        return (no_update,
+                dbc.Alert("Could not read the uploaded file. Ensure it is a plain CSV.",
+                          color="danger", className="py-1 mb-0"),
+                no_update)
+
+    try:
+        imported = ssa_earnings_to_segments(csv_text)
+    except ValueError as e:
+        return (no_update,
+                dbc.Alert(str(e), color="danger", className="py-1 mb-0"),
+                no_update)
+
+    # Preserve any existing segment dated after Dec 31 of the upload's last year.
+    cutoff = f"{imported[-1]['date'][:4]}-12-31"
+    preserved = [s for s in (existing_cfg.get("income_segments") or [])
+                 if s.get("date") and str(s["date"])[:10] > cutoff]
+    segments = sorted(imported + preserved, key=lambda s: s["date"])
+
+    save_user_profile(uid, {"income_segments": segments})
+    cfg.setdefault("users", {}).setdefault(uid, {})["income_segments"] = segments
+
+    span = f"{imported[0]['date'][:4]}–{imported[-1]['date'][:4]}"
+    kept = (f" Kept {len(preserved)} later entry(ies)." if preserved else "")
+    status = dbc.Alert(
+        f"Imported {len(imported)} income period(s) ({span}) from your SSA earnings "
+        f"record and saved.{kept}", color="success", className="py-1 mb-0")
     return json.dumps(cfg), status, segments

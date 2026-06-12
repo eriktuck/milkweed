@@ -1,14 +1,13 @@
 """Seed Erik's Profile fields (demographics + income segments) into the emulator.
 
-Derives gross-income *salary-change segments* from notebooks/payroll_data.csv:
-each distinct paycheck amount that repeats (a steady salary level) becomes one
-segment, dated at its first occurrence and annualized to a yearly rate
-(semi-monthly cadence ⇒ ×24). One-off bonuses / partial paychecks (amounts that
-appear only once) are treated as noise and dropped. A final $0 segment marks the
-end of employment, so income winds down to ~0 by 2025.
+Derives gross-income segments from the official SSA *Earnings Record* in
+data/payroll-data.csv (per-year taxed earnings). Each year becomes a Jan 1
+income segment; consecutive identical years collapse. Uses
+`core.utils.functions.ssa_earnings_to_segments` — the same converter the Profile
+page's uploader uses, so seed and UI can't drift.
 
-This is a *starting point*: Erik refines exact DOB and adds earlier history /
-part-time periods through the Profile UI.
+This is a *starting point*: Erik refines exact DOB and layers in mid-year raises
+through the Profile UI.
 
 Usage (emulator must already be running):
   firebase emulators:start --import=./emulator-data        # terminal 1
@@ -19,18 +18,13 @@ Usage (emulator must already be running):
 import os
 
 import firebase_admin
-import pandas as pd
 from firebase_admin import credentials, firestore
+
+from core.utils.functions import ssa_earnings_to_segments
 
 SERVICE_ACCOUNT = "secrets/firebase-service-account"
 EMULATOR_HOST = "localhost:8090"
-PAYROLL_CSV = "notebooks/payroll_data.csv"
-
-PAY_PERIODS_PER_YEAR = 24  # semi-monthly (15th + month-end)
-# Employment winds down after the last steady-salary paycheck; sporadic small
-# paychecks after this are treated as marginal. Held as a judgment call (not
-# derivable from the noisy tail), so income → 0 from here.
-EMPLOYMENT_END = "2024-06-01"
+PAYROLL_CSV = "data/payroll-data.csv"
 
 # Static demographics from the worked example (core/models/__init__.py).
 # birth_date year is real (1986); month/day are placeholders Erik edits in the UI.
@@ -52,30 +46,9 @@ def _emulator_db():
 
 
 def derive_income_segments(csv_path: str = PAYROLL_CSV) -> list[dict]:
-    """Build annualized salary-change segments from per-paycheck payroll data."""
-    df = pd.read_csv(csv_path, parse_dates=["Date"]).sort_values("Date")
-
-    # Steady salary levels = paycheck amounts that occur more than once.
-    counts = df["Gross Income"].value_counts()
-    steady = set(counts[counts >= 2].index)
-
-    segments = []
-    prev_level = None
-    for _, row in df.iterrows():
-        amount = row["Gross Income"]
-        if amount not in steady:
-            continue  # one-off bonus / partial period → noise
-        if amount == prev_level:
-            continue  # de-dupe: same salary level carried forward
-        segments.append({
-            "date": row["Date"].strftime("%Y-%m-%d"),
-            "amount": round(float(amount) * PAY_PERIODS_PER_YEAR, 2),
-        })
-        prev_level = amount
-
-    # Wind-down to $0 at end of employment.
-    segments.append({"date": EMPLOYMENT_END, "amount": 0.0})
-    return segments
+    """Build yearly income segments from the SSA earnings-record CSV."""
+    with open(csv_path) as f:
+        return ssa_earnings_to_segments(f.read())
 
 
 def find_user(db, name: str = "erik") -> str | None:
@@ -92,13 +65,30 @@ def seed():
     if not uid:
         raise SystemExit("No user named 'erik' found in the emulator.")
 
-    segments = derive_income_segments()
-    payload = {**DEMOGRAPHICS, "income_segments": segments}
+    existing = db.collection("users").document(uid).get().to_dict() or {}
+    imported = derive_income_segments()
+
+    # Overwrite the earnings history through the record's last year, but keep any
+    # existing segment dated after it — those are forward-looking edits (a planned
+    # raise / new job) the record can't know about. Mirrors the Profile uploader.
+    cutoff = f"{imported[-1]['date'][:4]}-12-31"
+    preserved = [s for s in (existing.get("income_segments") or [])
+                 if s.get("date") and str(s["date"])[:10] > cutoff]
+    segments = sorted(imported + preserved, key=lambda s: s["date"])
+
+    # Only fill demographics the user hasn't already set, so a customized birth
+    # date / ages are never clobbered.
+    payload = {"income_segments": segments}
+    for k, v in DEMOGRAPHICS.items():
+        if not existing.get(k):
+            payload[k] = v
 
     print(f"Seeding profile for users/{uid} (erik):")
-    for k, v in DEMOGRAPHICS.items():
-        print(f"  {k}: {v}")
-    print("  income_segments:")
+    for k in DEMOGRAPHICS:
+        note = "" if k in payload else "  (kept existing)"
+        print(f"  {k}: {payload.get(k, existing.get(k))}{note}")
+    print(f"  income_segments: {len(imported)} imported + {len(preserved)} preserved "
+          f"(after {cutoff})")
     for s in segments:
         print(f"    {s['date']}  ${s['amount']:>12,.2f}/yr")
 

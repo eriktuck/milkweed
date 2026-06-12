@@ -1,3 +1,5 @@
+import csv
+import io
 from datetime import datetime as dt
 import numpy as np
 import pandas as pd
@@ -1205,6 +1207,91 @@ def segments_to_annual_income(
 
     annual.index = annual.index.astype(int)
     return annual.sort_index()
+
+
+def _money_to_float(text: str) -> float | None:
+    """Parse a possibly-formatted money string ('$1,234', '1234.5') to float."""
+    if text is None:
+        return None
+    cleaned = str(text).replace("$", "").replace(",", "").strip()
+    if cleaned in ("", "-"):
+        return None
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
+
+
+def ssa_earnings_to_segments(csv_text: str, basis: str = "medicare") -> list[dict]:
+    """Convert an SSA *Earnings Record* CSV to forward-filled income segments.
+
+    The Social Security Administration publishes a per-year earnings history with
+    columns ``Work Year``, ``Taxed Social Security Earnings`` and ``Taxed Medicare
+    Earnings`` (dollar values may carry ``$`` and thousands separators). Because the
+    data is yearly, each year becomes a segment dated **Jan 1 (1/1/YYYY)**: this
+    preserves the ``income_segments`` data model and lets the user later layer in
+    mid-year raises without disturbing the imported history. Consecutive years with
+    identical earnings collapse to a single segment, since the forward-fill carries
+    the value forward (so only *changes* are stored).
+
+    ``basis`` selects which column feeds the segment ``amount``:
+    - ``"medicare"`` (default) — Medicare earnings are uncapped, so they are the
+      truer gross-income figure. The retirement SS model re-caps internally
+      (``covered_earnings``), so capping here would only lose information.
+    - ``"social_security"`` — earnings already capped at the OASDI wage base.
+
+    Returns segments sorted ascending by date:
+    ``[{"date": "YYYY-01-01", "amount": float}, ...]``. Raises ``ValueError`` if the
+    CSV has no recognisable year/earnings columns or no usable rows.
+    """
+    reader = csv.DictReader(io.StringIO(csv_text))
+    if not reader.fieldnames:
+        raise ValueError("The CSV is empty or has no header row.")
+
+    # Locate columns by fuzzy header match (tolerant of spacing/case).
+    norm = {name: name.strip().lower() for name in reader.fieldnames}
+    year_col = ss_col = medicare_col = None
+    for name, low in norm.items():
+        if "year" in low:
+            year_col = name
+        elif "medicare" in low:
+            medicare_col = name
+        elif "social security" in low or low == "social_security":
+            ss_col = name
+    amount_col = medicare_col if basis == "medicare" else ss_col
+    if amount_col is None:  # fall back to whichever earnings column exists
+        amount_col = ss_col or medicare_col
+    if year_col is None or amount_col is None:
+        raise ValueError(
+            "Could not find 'Work Year' and an earnings column in the CSV."
+        )
+
+    rows = []
+    for row in reader:
+        try:
+            year = int(str(row[year_col]).strip())
+        except (TypeError, ValueError):
+            continue
+        amount = _money_to_float(row.get(amount_col))
+        if amount is None:
+            continue
+        rows.append((year, amount))
+
+    if not rows:
+        raise ValueError("No usable year/earnings rows were found in the CSV.")
+
+    rows.sort(key=lambda r: r[0])  # ascending by year
+
+    # Forward-fill de-dupe: keep a year only if its amount differs from the
+    # previously kept year's amount.
+    segments: list[dict] = []
+    prev_amount = None
+    for year, amount in rows:
+        if amount == prev_amount:
+            continue
+        segments.append({"date": f"{year:04d}-01-01", "amount": amount})
+        prev_amount = amount
+    return segments
 
 
 def calculate_married_joint_tax(income):
