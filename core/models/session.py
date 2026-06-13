@@ -79,6 +79,13 @@ class RetirementConfig(BaseModel):
     # tax-advantaged-first default (retirement.default_contribution_allocation).
     contribution_allocation: Dict[str, float] | None = None
 
+    # Edited per-category retirement expenses (monthly real $), keyed by csp_key:
+    #   {csp_key: {"go_go": 3200, "slow_go": 2900, "no_go": 2700}}
+    # Persisted by the Coast Expenses module so edits survive reloads; absent → the
+    # table re-seeds from the latest CSP plan × research phase_factors. build_scenario
+    # consumes the phase totals via its spend_by_phase override (the page passes them).
+    expenses: Dict[str, Dict[str, float]] | None = None
+
 
 class UserConfig(BaseModel):
     accounts: List[str]

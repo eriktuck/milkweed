@@ -295,6 +295,10 @@ RETIREMENT_FIELDS = (
     "no_go_age",
     "real_return",
     "withdrawal_rate",
+    # Coast assumption-module edits (.planning/SPEC-scenario-planning.md):
+    "healthcare",
+    "ltc_type",
+    "expenses",
 )
 
 

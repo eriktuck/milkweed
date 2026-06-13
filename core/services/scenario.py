@@ -156,6 +156,7 @@ def build_scenario(
     pia_annual: float | None = None,
     gain_fraction: float | None = None,
     healthcare_overrides: dict | None = None,
+    spend_by_phase: dict | None = None,
     as_of_year: int | None = None,
 ) -> Scenario:
     """Build the full Coast scenario from config + the two live inputs.
@@ -195,9 +196,15 @@ def build_scenario(
              or default_contribution_allocation(annual))
 
     # ── spend / healthcare / Social Security (the backward inputs) ──
-    phase_factors = resolve_phase_factors(ret_cfg)
-    by_phase = annual_spend_by_phase(active_plan, csp_labels, phase_factors)
-    spend = {p: by_phase[p]["total"] for p in PHASES}
+    # The Coast Expenses module passes edited per-phase annual totals; otherwise the
+    # spend is derived from the CSP plan × research phase factors (the default path,
+    # identical to default_nest_egg_goal).
+    if spend_by_phase is not None:
+        spend = {p: float(spend_by_phase.get(p, 0.0)) for p in PHASES}
+    else:
+        phase_factors = resolve_phase_factors(ret_cfg)
+        by_phase = annual_spend_by_phase(active_plan, csp_labels, phase_factors)
+        spend = {p: by_phase[p]["total"] for p in PHASES}
 
     hc_overrides = healthcare_overrides if healthcare_overrides is not None else (
         ret_cfg.get("healthcare") or {})

@@ -21,14 +21,28 @@ from datetime import date
 import dash
 import dash_bootstrap_components as dbc
 import plotly.graph_objects as go
-from dash import Input, Output, State, callback, dcc, html
+from dash import Input, Output, State, callback, dash_table, dcc, html
 from flask import session
 
 import core.utils.functions as functions
 from core.services.firebase import save_retirement_config
 from core.services.forecast import default_monthly_contribution
 from core.services.investments import fetch_latest_holdings
-from core.services.retirement import balances_by_tax_bucket, resolve_assumptions
+from core.services.retirement import (
+    DEFAULT_PHASE_FACTOR,
+    HC_ACA_ANNUAL,
+    HC_OOP_ANNUAL,
+    LTC_DEFAULT_ANNUAL,
+    LTC_DEFAULT_START_AGE,
+    LTC_DEFAULT_TYPE,
+    MEDICARE_PART_B_MONTHLY_2025,
+    PHASES,
+    annual_spend_by_phase,
+    balances_by_tax_bucket,
+    phase_for_age,
+    resolve_assumptions,
+    resolve_phase_factors,
+)
 from core.services.returns import (
     bootstrap_projection,
     build_returns_payload,
@@ -117,6 +131,134 @@ def _current_age(user_cfg) -> int:
     a = resolve_assumptions(user_cfg or {})
     by = a.get("birth_year")
     return (date.today().year - int(by)) if by else _DEFAULT_CURRENT_AGE
+
+
+def _money_input(id_, **kw):
+    """$-prefixed numeric input (mirrors pages/retirement.py)."""
+    return dbc.InputGroup([dbc.InputGroupText("$"),
+                           dbc.Input(id=id_, type="number", size="sm", **kw)], size="sm")
+
+
+# ── Expenses + healthcare constants/helpers (ported from pages/retirement.py) ─────
+
+# Healthcare input defaults (totals per life stage = stage premium + baseline OOP).
+_HC_ACA_DEFAULT = int(HC_ACA_ANNUAL + HC_OOP_ANNUAL)                            # pre-65
+_HC_MEDICARE_DEFAULT = int(MEDICARE_PART_B_MONTHLY_2025 * 12 + HC_OOP_ANNUAL)   # 65+
+
+_LTC_TYPE_OPTIONS = [
+    {"label": "None", "value": "none"},
+    {"label": "In-home care", "value": "in_home"},
+    {"label": "Nursing home", "value": "nursing"},
+]
+
+# CSP label → display header, in canonical CSP order (mirrors pages/retirement.py).
+_EXPENSE_GROUPS = [
+    ("fixed", "Fixed Costs"),
+    ("investments", "Investments"),
+    ("sinking", "Sinking"),
+    ("guilt-free", "Guilt Free"),
+]
+_EXPENSE_GROUP_LABEL = dict(_EXPENSE_GROUPS)
+_EXPENSE_GROUP_RANK = {label: i for i, (label, _) in enumerate(_EXPENSE_GROUPS)}
+
+_EXPENSE_COLUMNS = [
+    {"name": "CSP category", "id": "category", "editable": False},
+    {"name": "Go-go $/mo", "id": "go_go", "type": "numeric", "editable": True},
+    {"name": "Slow-go $/mo", "id": "slow_go", "type": "numeric", "editable": True},
+    {"name": "No-go $/mo", "id": "no_go", "type": "numeric", "editable": True},
+    {"name": "factor", "id": "factor", "editable": False},
+]
+
+
+def _pretty(key: str) -> str:
+    """csp-key → display label (e.g. 'home_other' → 'Home Other')."""
+    return key.replace("_", " ").title()
+
+
+def _num(v) -> float:
+    """Coerce an editable DataTable cell (may be '' / str / None) to float."""
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _spend_from_table(rows) -> dict:
+    """Annual go-go/slow-go/no-go living spend = 12 × Σ each phase column."""
+    rows = rows or []
+    return {ph: 12.0 * sum(_num(r.get(ph)) for r in rows if r.get("key")) for ph in PHASES}
+
+
+def _group_header_row(label: str) -> dict:
+    """A non-numeric divider row that titles a CSP group (blank key → skipped by
+    the edit/sum helpers)."""
+    return {"key": None, "category": _EXPENSE_GROUP_LABEL[label],
+            "go_go": "", "slow_go": "", "no_go": "", "factor": ""}
+
+
+def _seed_expense_rows(user_cfg) -> list[dict]:
+    """One editable monthly row per living-expense csp key, seeded from the CSP plan
+    (go-go) × research multipliers (slow-go/no-go), with saved edits applied on top.
+
+    Single-individual scope (no household fold — see the spec's open questions):
+    the row set, ordering and per-row factor hint come from the user's own latest
+    CSP plan via `annual_spend_by_phase`; any persisted `RetirementConfig.expenses`
+    override the cell values so edits survive reloads. Rows are grouped by CSP label
+    (Fixed → Investments → Sinking → Guilt Free) then the user's `cat_order`, with a
+    divider row per group.
+    """
+    active_plan = _active_plan(user_cfg)
+    csp_labels = user_cfg.get("csp_labels") or {}
+    factors = resolve_phase_factors((user_cfg or {}).get("retirement"))
+    by_phase = annual_spend_by_phase(active_plan, csp_labels, factors)
+    saved = ((user_cfg or {}).get("retirement") or {}).get("expenses") or {}
+
+    rows = []
+    for key in by_phase["go_go"]["by_key"]:
+        f = factors.get(key, DEFAULT_PHASE_FACTOR)
+        row = {
+            "key": key,
+            "category": _pretty(key),
+            "go_go": round(by_phase["go_go"]["by_key"][key] / 12),
+            "slow_go": round(by_phase["slow_go"]["by_key"][key] / 12),
+            "no_go": round(by_phase["no_go"]["by_key"][key] / 12),
+            "factor": f"{f.get('slow_go', 1.0):.0%}/{f.get('no_go', 1.0):.0%}",
+        }
+        if key in saved:  # persisted edits win over the CSP re-seed
+            for ph in PHASES:
+                if saved[key].get(ph) is not None:
+                    row[ph] = round(_num(saved[key][ph]))
+        rows.append(row)
+
+    order_index = {name: i for i, name in enumerate((user_cfg or {}).get("cat_order") or [])}
+    rows.sort(key=lambda r: (
+        _EXPENSE_GROUP_RANK.get(csp_labels.get(r["key"]), len(_EXPENSE_GROUPS)),
+        order_index.get(r["key"], len(order_index)),
+        r["category"],
+    ))
+
+    out: list[dict] = []
+    current = object()
+    for r in rows:
+        label = csp_labels.get(r["key"])
+        if label != current:
+            current = label
+            if label in _EXPENSE_GROUP_LABEL and label != "guilt-free":
+                out.append(_group_header_row(label))
+        out.append(r)
+    return out
+
+
+def _healthcare_overrides(aca, medicare, ltc, ltc_age) -> dict:
+    """The healthcare_costs_by_age kwargs build_scenario expects. oop_annual=0 because
+    the per-stage totals already fold out-of-pocket in (mirrors retirement.recompute)."""
+    return {
+        "oop_annual": 0.0,
+        "aca_annual": _num(aca),
+        "medicare_annual": _num(medicare),
+        "ltc_annual": _num(ltc),
+        "ltc_start_age": int(ltc_age or LTC_DEFAULT_START_AGE),
+    }
 
 
 # ── Compact BAN (cockpit-sized; lighter than the dbc.Card BANs elsewhere) ─────────
@@ -275,6 +417,114 @@ _rate_module = _module(
 )
 
 
+# ── Assumption module 2: Retirement expenses + healthcare ────────────────────────
+
+_expenses_table = dash_table.DataTable(
+    id="co-exp-table",
+    columns=_EXPENSE_COLUMNS,
+    data=[],
+    editable=True,
+    cell_selectable=True,
+    style_as_list_view=True,
+    style_table={"overflowX": "auto"},
+    style_cell={"fontSize": "13px", "padding": "6px 10px", "fontFamily": "inherit"},
+    style_header={"fontWeight": "600", "fontSize": "11px", "textTransform": "uppercase",
+                  "color": "#888", "border": "none", "borderBottom": "1px solid #dee2e6"},
+    style_cell_conditional=[
+        {"if": {"column_id": "category"}, "textAlign": "left", "minWidth": "180px"},
+        {"if": {"column_id": "factor"}, "textAlign": "right", "color": "#aaa",
+         "fontSize": "11px"},
+        {"if": {"column_id": "go_go"}, "textAlign": "right"},
+        {"if": {"column_id": "slow_go"}, "textAlign": "right"},
+        {"if": {"column_id": "no_go"}, "textAlign": "right"},
+    ],
+    style_data_conditional=[
+        {"if": {"column_id": "go_go"}, "color": "#3f78c4"},
+        {"if": {"column_id": "slow_go"}, "color": "#3a9d5d"},
+        {"if": {"column_id": "no_go"}, "color": "#b9791b"},
+        *[
+            {"if": {"filter_query": f'{{category}} = "{name}"'},
+             "fontWeight": "700", "textTransform": "uppercase", "fontSize": "11px",
+             "color": "#555", "backgroundColor": "#f5f5f5"}
+            for _, name in _EXPENSE_GROUPS
+        ],
+    ],
+)
+
+_expenses_module = _module(
+    "co-exp", "fa-receipt", "Retirement expenses & healthcare", "co-exp-summary",
+    body=[
+        html.P([
+            "Go-go is seeded from your latest CSP plan; slow-go and no-go apply research "
+            "multipliers — edit any cell, or rescale a whole phase below. Healthcare is "
+            "modelled separately (it rises late), so ",
+            html.B("medical & health insurance are excluded here"), ".",
+        ], className="text-muted small mb-3"),
+        _expenses_table,
+        html.P(id="co-exp-note", className="text-muted small mt-2 mb-1"),
+        dbc.Row([
+            dbc.Col(html.Span("Rescale a whole phase from go-go (keeps the research shape):",
+                              className="small text-muted"), width="auto",
+                    className="d-flex align-items-center"),
+            dbc.Col([
+                dbc.Label("Slow-go", className="small text-muted mb-1"),
+                dbc.InputGroup([
+                    dbc.Input(id="co-exp-slow-scale", type="number", value=100, min=0,
+                              max=200, step=5, size="sm", style={"width": "70px"}),
+                    dbc.InputGroupText("%")], size="sm"),
+            ], width="auto"),
+            dbc.Col([
+                dbc.Label("No-go", className="small text-muted mb-1"),
+                dbc.InputGroup([
+                    dbc.Input(id="co-exp-no-scale", type="number", value=100, min=0,
+                              max=200, step=5, size="sm", style={"width": "70px"}),
+                    dbc.InputGroupText("%")], size="sm"),
+            ], width="auto"),
+            dbc.Col(dbc.Button("Apply", id="co-exp-apply-scale", color="secondary",
+                               size="sm", outline=True),
+                    width="auto", className="d-flex align-items-end"),
+            dbc.Col(html.Span(id="co-exp-totals", className="small fw-bold"),
+                    className="d-flex align-items-end"),
+        ], className="g-3 align-items-end"),
+
+        html.Hr(className="my-3"),
+        html.Div([html.B("Healthcare — its own expense "),
+                  dbc.Badge("rises late", color="warning", className="align-middle")],
+                 className="mb-2"),
+        dbc.Row([
+            dbc.Col([dbc.Label("ACA bridge (pre-65), $/yr", className="small text-muted mb-1"),
+                     _money_input("co-hc-aca", value=_HC_ACA_DEFAULT, min=0, step=500)], lg=3),
+            dbc.Col([dbc.Label("Medicare + OOP (65+), $/yr", className="small text-muted mb-1"),
+                     _money_input("co-hc-medicare", value=_HC_MEDICARE_DEFAULT, min=0, step=500)], lg=3),
+            dbc.Col([dbc.Label("Long-term care", className="small text-muted mb-1"),
+                     dbc.Select(id="co-hc-ltc-type", size="sm", options=_LTC_TYPE_OPTIONS,
+                                value=LTC_DEFAULT_TYPE)], lg=2),
+            dbc.Col([dbc.Label("LTC cost, $/yr", className="small text-muted mb-1"),
+                     _money_input("co-hc-ltc", value=int(LTC_DEFAULT_ANNUAL), min=0, step=5000)], lg=2),
+            dbc.Col([dbc.Label("LTC start age", className="small text-muted mb-1"),
+                     dbc.Input(id="co-hc-ltc-age", type="number", value=LTC_DEFAULT_START_AGE,
+                               min=65, max=105, step=1, size="sm")], lg=2),
+        ], className="g-2 mb-1"),
+        html.Small("Defaults are research medians (Medicare Part B + out-of-pocket; ACA "
+                   "unsubsidized). Genworth 2024 LTC medians: in-home ~$75k, nursing "
+                   "~$128k — type the cost for your chosen care type, or set type to "
+                   "\"None\" to drop the LTC spike.", className="text-muted d-block mb-3"),
+
+        html.P("Expenses over retirement — living spend, healthcare, and the total",
+               className="text-muted small mb-2"),
+        dcc.Loading(dcc.Graph(id="co-glide-chart", config={"displayModeBar": False}),
+                    type="circle"),
+        html.P(id="co-glide-note", className="text-muted small mt-2 mb-0"),
+
+        html.Div([
+            dbc.Button("Save expenses & healthcare", id="co-exp-save", color="primary",
+                       size="sm", outline=True),
+            html.Span(id="co-exp-save-status", className="small ms-2"),
+        ], className="mt-3"),
+    ],
+)
+
+
 # ── Page layout ──────────────────────────────────────────────────────────────────
 
 layout = html.Div(dbc.Container([
@@ -298,6 +548,7 @@ layout = html.Div(dbc.Container([
     html.H6("Assumptions — set & forget", className="text-muted text-uppercase mb-2",
             style={"fontSize": ".72rem", "letterSpacing": ".1em"}),
     _rate_module,
+    _expenses_module,
     html.P([html.I(className="fas fa-circle-info me-1"),
             "Editing any assumption re-runs the scenario above — the chart and BANs "
             "update live."], className="assist-note mt-2"),
@@ -307,6 +558,7 @@ layout = html.Div(dbc.Container([
 # ── Seed the slider + contribution from config (Profile is the truth) ────────────
 
 _module_toggle("co-rr")
+_module_toggle("co-exp")
 
 
 @callback(
@@ -358,6 +610,114 @@ def seed_inputs(config_data, use_case):
     return lo, hi, marks, value, round(monthly, 2), hint, meta, real_return_pct
 
 
+# ── Module 2 seeds: expenses table + healthcare inputs from config ────────────────
+
+@callback(
+    Output("co-exp-table", "data"),
+    Input("config-store", "data"),
+    Input("use-case", "value"),
+)
+def seed_expenses(config_data, use_case):
+    user_cfg = _user_cfg(config_data, _selected_uid(use_case))
+    if user_cfg is None:
+        raise dash.exceptions.PreventUpdate
+    return _seed_expense_rows(user_cfg)
+
+
+@callback(
+    Output("co-hc-aca", "value"),
+    Output("co-hc-medicare", "value"),
+    Output("co-hc-ltc-type", "value"),
+    Output("co-hc-ltc", "value"),
+    Output("co-hc-ltc-age", "value"),
+    Input("config-store", "data"),
+    Input("use-case", "value"),
+)
+def seed_healthcare(config_data, use_case):
+    """Hydrate the healthcare card from persisted RetirementConfig.healthcare/ltc_type,
+    falling back to the research-median defaults."""
+    user_cfg = _user_cfg(config_data, _selected_uid(use_case))
+    if user_cfg is None:
+        raise dash.exceptions.PreventUpdate
+    hc = ((user_cfg.get("retirement") or {}).get("healthcare")) or {}
+    ltc_type = (user_cfg.get("retirement") or {}).get("ltc_type") or LTC_DEFAULT_TYPE
+    return (
+        int(hc.get("aca_annual", _HC_ACA_DEFAULT)),
+        int(hc.get("medicare_annual", _HC_MEDICARE_DEFAULT)),
+        ltc_type,
+        int(hc.get("ltc_annual", LTC_DEFAULT_ANNUAL)),
+        int(hc.get("ltc_start_age", LTC_DEFAULT_START_AGE)),
+    )
+
+
+@callback(
+    Output("co-exp-table", "data", allow_duplicate=True),
+    Input("co-exp-apply-scale", "n_clicks"),
+    State("co-exp-table", "data"),
+    State("co-exp-slow-scale", "value"),
+    State("co-exp-no-scale", "value"),
+    State("config-store", "data"),
+    State("use-case", "value"),
+    prevent_initial_call=True,
+)
+def apply_scale(_n, rows, slow_pct, no_pct, config_data, use_case):
+    """Recompute slow-go/no-go = go-go × per-category research factor × phase-scale%
+    (honours manual go-go edits; composes with the per-category shape)."""
+    user_cfg = _user_cfg(config_data, _selected_uid(use_case))
+    if user_cfg is None or not rows:
+        raise dash.exceptions.PreventUpdate
+    factors = resolve_phase_factors((user_cfg or {}).get("retirement"))
+    _pct = lambda v: 1.0 if v in (None, "") else _num(v) / 100.0
+    slow_s, no_s = _pct(slow_pct), _pct(no_pct)
+    for row in rows:
+        if not row.get("key"):
+            continue
+        gg = _num(row.get("go_go"))
+        f = factors.get(row.get("key"), DEFAULT_PHASE_FACTOR)
+        row["slow_go"] = round(gg * f.get("slow_go", 1.0) * slow_s)
+        row["no_go"] = round(gg * f.get("no_go", 1.0) * no_s)
+    return rows
+
+
+@callback(
+    Output("config-store", "data", allow_duplicate=True),
+    Output("co-exp-save-status", "children"),
+    Input("co-exp-save", "n_clicks"),
+    State("co-exp-table", "data"),
+    State("co-hc-aca", "value"),
+    State("co-hc-medicare", "value"),
+    State("co-hc-ltc-type", "value"),
+    State("co-hc-ltc", "value"),
+    State("co-hc-ltc-age", "value"),
+    State("config-store", "data"),
+    State("use-case", "value"),
+    prevent_initial_call=True,
+)
+def save_expenses(n, rows, hc_aca, hc_medicare, ltc_type, hc_ltc, hc_ltc_age,
+                  config_data, use_case):
+    """Persist edited per-category expenses + healthcare to RetirementConfig and mirror
+    into config-store so the in-session view matches Firestore without a reload."""
+    if not n:
+        raise dash.exceptions.PreventUpdate
+    uid = _selected_uid(use_case)
+    if not uid or not config_data:
+        raise dash.exceptions.PreventUpdate
+
+    expenses = {
+        r["key"]: {ph: _num(r.get(ph)) for ph in PHASES}
+        for r in (rows or []) if r.get("key")
+    }
+    healthcare = _healthcare_overrides(hc_aca, hc_medicare, hc_ltc, hc_ltc_age)
+    payload = {"expenses": expenses, "healthcare": healthcare,
+               "ltc_type": ltc_type or LTC_DEFAULT_TYPE}
+    save_retirement_config(uid, payload)
+
+    cfg = json.loads(config_data)
+    ret_cfg = cfg.setdefault("users", {}).setdefault(uid, {}).setdefault("retirement", {})
+    ret_cfg.update(payload)
+    return json.dumps(cfg), dbc.Badge("Saved", color="success", className="ms-1")
+
+
 # ── Recompute: BANs + chart from build_scenario ──────────────────────────────────
 
 @callback(
@@ -368,14 +728,25 @@ def seed_inputs(config_data, use_case):
     Output("co-ban-required", "children"),
     Output("co-projection-chart", "figure"),
     Output("co-rr-summary", "children"),
+    Output("co-glide-chart", "figure"),
+    Output("co-glide-note", "children"),
+    Output("co-exp-totals", "children"),
+    Output("co-exp-note", "children"),
+    Output("co-exp-summary", "children"),
     Input("co-milestones", "value"),
     Input("co-monthly", "value"),
     Input("co-color-mode", "value"),
     Input("co-real-return", "value"),
+    Input("co-exp-table", "data"),
+    Input("co-hc-aca", "value"),
+    Input("co-hc-medicare", "value"),
+    Input("co-hc-ltc", "value"),
+    Input("co-hc-ltc-age", "value"),
     Input("config-store", "data"),
     Input("use-case", "value"),
 )
-def recompute(milestones, monthly, color_mode, real_return, config_data, use_case):
+def recompute(milestones, monthly, color_mode, real_return, exp_rows,
+              hc_aca, hc_medicare, hc_ltc, hc_ltc_age, config_data, use_case):
     uid = _selected_uid(use_case)
     user_cfg = _user_cfg(config_data, uid)
     if user_cfg is None or not milestones or len(milestones) != 5:
@@ -391,6 +762,12 @@ def recompute(milestones, monthly, color_mode, real_return, config_data, use_cas
     # Live real-return override from the rate-of-return module (None → config default).
     r_override = float(real_return) / 100.0 if real_return is not None else None
 
+    # Live expenses + healthcare overrides from the Expenses module. The table drives
+    # the spend stream; None (table not seeded yet) → build_scenario's CSP-derived
+    # default so the page still renders on first paint.
+    spend_override = _spend_from_table(exp_rows) if exp_rows else None
+    hc_overrides = _healthcare_overrides(hc_aca, hc_medicare, hc_ltc, hc_ltc_age)
+
     # Single resolution path: build_scenario merges the live inputs over config.
     # death_age stays config-resolved (the slider owns the 5 milestone handles).
     s = build_scenario(
@@ -399,6 +776,7 @@ def recompute(milestones, monthly, color_mode, real_return, config_data, use_cas
         coast_age=coast_age, retirement_age=retirement_age, claim_age=claim_age,
         slow_go_age=slow_go_age, no_go_age=no_go_age,
         real_return=r_override,
+        spend_by_phase=spend_override, healthcare_overrides=hc_overrides,
     )
     rr_summary = f"{s.real_return * 100:.1f}% real"
 
@@ -425,7 +803,28 @@ def recompute(milestones, monthly, color_mode, real_return, config_data, use_cas
     ban_required = _ban("Required monthly", f"${req:,.0f}/mo", req_sub, value_class=req_cls)
 
     fig = _projection_figure(s, color_mode)
-    return chips, ban_goal, ban_target, ban_status, ban_required, fig, rr_summary
+
+    # ── Expenses module outputs (glide smile + summaries) ────────────────────────
+    glide = _glide_figure(s.spend_by_phase, s.healthcare_by_age,
+                          retirement_age, slow_go_age, no_go_age, s.death_age)
+    spend = s.spend_by_phase
+    totals = (f"Annual: go-go {_money(spend['go_go'])} · slow-go {_money(spend['slow_go'])} "
+              f"· no-go {_money(spend['no_go'])}")
+    n_rows = sum(1 for r in (exp_rows or []) if r.get("key"))
+    note = (f"{n_rows} living-expense categories from your CSP plan, stepping down at each "
+            "phase boundary. Healthcare is modelled separately below."
+            ) if n_rows else "No CSP plan found — add one on the CSP page to seed these expenses."
+    health = {int(k): float(v) for k, v in
+              (s.healthcare_by_age.to_dict() if s.healthcare_by_age is not None else {}).items()}
+    hc_peak = max(health.values()) if health else 0.0
+    glide_note = (f"Living spend steps down from {_money(max(spend.values()) if spend else 0)} "
+                  f"while healthcare climbs to {_money(hc_peak)} late — their sum is the "
+                  "spending smile that drives the nest-egg goal above.")
+    ltc_bit = (f" · LTC from {int(hc_ltc_age)}" if _num(hc_ltc) > 0 else "")
+    exp_summary = f"{_money(spend['go_go'])}/yr go-go{ltc_bit}"
+
+    return (chips, ban_goal, ban_target, ban_status, ban_required, fig, rr_summary,
+            glide, glide_note, totals, note, exp_summary)
 
 
 # ── Figure ───────────────────────────────────────────────────────────────────────
@@ -517,6 +916,45 @@ def _projection_figure(s, mode) -> go.Figure:
         yaxis=dict(title=None, tickprefix="$", tickformat="~s", showgrid=True,
                    gridcolor="#eee", zeroline=False),
         hovermode="x unified",
+    )
+    return fig
+
+
+def _glide_figure(spend, hc, retirement_age, slow_go_age, no_go_age, death_age) -> go.Figure:
+    """Annual expenses over retirement: living spend (step-down across the three
+    phases), healthcare on its own line (the late-life rise), and their sum — the
+    rising "smile" that drives the nest-egg goal (ported from pages/retirement.py)."""
+    ages = list(range(int(retirement_age), int(death_age) + 1))
+    living = [spend.get(phase_for_age(a, slow_go_age, no_go_age), 0.0) for a in ages]
+    health = {int(k): float(v) for k, v in (hc.to_dict() if hc is not None else {}).items()}
+    hc_y = [health.get(a, 0.0) for a in ages]
+    total = [lv + h for lv, h in zip(living, hc_y)]
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=ages, y=living, mode="lines", name="Living spend",
+        line=dict(width=2.2, color="#7fb3f5", shape="hv"), fill="tozeroy",
+        fillcolor="rgba(127,179,245,0.12)",
+        hovertemplate="Age %{x}<br>living spend %{y:$,.0f}<extra></extra>",
+    ))
+    fig.add_trace(go.Scatter(
+        x=ages, y=hc_y, mode="lines", name="Healthcare",
+        line=dict(width=2.2, color=_C_TARGET, shape="hv"),
+        hovertemplate="Age %{x}<br>healthcare %{y:$,.0f}<extra></extra>",
+    ))
+    fig.add_trace(go.Scatter(
+        x=ages, y=total, mode="lines", name="Total expenses",
+        line=dict(width=2.8, color="#444", shape="hv"),
+        hovertemplate="Age %{x}<br>total %{y:$,.0f}<extra></extra>",
+    ))
+    fig.add_vline(x=slow_go_age, line_width=1, line_dash="dot", line_color="#cbd5e1")
+    fig.add_vline(x=no_go_age, line_width=1, line_dash="dot", line_color="#cbd5e1")
+    fig.update_layout(
+        **_CHART_LAYOUT, height=300, margin=dict(l=10, r=10, t=30, b=10),
+        xaxis=dict(title="Age", showgrid=False),
+        yaxis=dict(title=None, tickprefix="$", tickformat="~s", showgrid=True,
+                   gridcolor="#eee", zeroline=False, rangemode="tozero"),
+        hovermode="x unified", showlegend=True,
     )
     return fig
 
