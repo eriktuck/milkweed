@@ -160,3 +160,33 @@
 .app-content {
     margin-left: var(--mw-sidebar-w);
 }
+
+/* ===================== Coast page (scenario cockpit) ===================== */
+:root {
+    --mw-amber: #f59e0b;
+}
+
+/* compact BANs in the cockpit (lighter than the dbc.Card BANs elsewhere) */
+.ban-label {
+    color: #6c757d;
+    font-size: .8rem;
+    margin-bottom: .25rem;
+}
+.ban-value {
+    font-size: 1.6rem;
+    font-weight: 700;
+    margin: 0;
+    line-height: 1.1;
+}
+.ban-sub {
+    color: #6c757d;
+    font-size: .8rem;
+    margin: .25rem 0 0;
+}
+.ban-value.good { color: #2f9e6f; }
+.ban-value.warn { color: var(--mw-amber); }
+
+.assist-note {
+    font-size: .78rem;
+    color: #6c757d;
+}
