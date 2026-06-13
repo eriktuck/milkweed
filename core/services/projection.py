@@ -63,7 +63,7 @@ def simulate_lifetime(
     spend_by_phase: dict,
     slow_go_age: int,
     no_go_age: int,
-    r_accum: float,
+    r_accum: float | dict | pd.Series,
     r_retire: float,
     ss_by_age: pd.Series | dict | None = None,
     healthcare_by_age: pd.Series | dict | None = None,
@@ -73,8 +73,12 @@ def simulate_lifetime(
     """Year-by-year bucket-level projection from current_age to death_age.
 
     `buckets` / `allocation` are {taxable, trad, roth} maps — current balances and
-    the annual contribution split. Contributions are applied while `age < coast_age`
-    and grow at `r_accum`; from `coast_age` to `retirement_age` balances grow with
+    the annual contribution split. `r_accum` is the accumulation real return: a
+    scalar (flat rate) or an `{age: rate}` map / Series for a target-date glide path
+    (.planning SPEC delta) — each accumulation year grows at its own rate; missing
+    ages fall back to the path's terminal (oldest) rate. Contributions are applied
+    while `age < coast_age` and grow at `r_accum`; from `coast_age` to
+    `retirement_age` balances grow with
     no new money; from `retirement_age` the tax-aware drawdown runs at `r_retire`,
     funding each year's net living need (phase spend + healthcare − Social Security)
     after tax, withdrawing taxable → trad → roth with RMDs forced from trad at
@@ -92,7 +96,15 @@ def simulate_lifetime(
     coast_age = int(coast_age)
     retirement_age = int(retirement_age)
     death_age = int(death_age)
-    ra = float(r_accum)
+    # Accumulation return: scalar (flat) or {age: rate} glide path. For a glide,
+    # missing ages fall back to the terminal (oldest) rate — the most de-risked.
+    if isinstance(r_accum, (int, float)):
+        _ra_const = float(r_accum)
+        ra_at = lambda age: _ra_const  # noqa: E731
+    else:
+        _ra_map = _as_age_lookup(r_accum)
+        _ra_fallback = _ra_map[max(_ra_map)] if _ra_map else 0.0
+        ra_at = lambda age: _ra_map.get(age, _ra_fallback)  # noqa: E731
     rr = float(r_retire)
     ss = _as_age_lookup(ss_by_age)
     health = _as_age_lookup(healthcare_by_age)
@@ -124,6 +136,7 @@ def simulate_lifetime(
         }
         rows.append(row)
 
+        ra = ra_at(age)
         taxable = taxable * (1 + ra) + year_alloc["taxable"]
         trad = trad * (1 + ra) + year_alloc["trad"]
         roth = roth * (1 + ra) + year_alloc["roth"]

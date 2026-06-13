@@ -294,6 +294,7 @@ RETIREMENT_FIELDS = (
     "slow_go_age",
     "no_go_age",
     "real_return",
+    "return_strategy",
     "withdrawal_rate",
     # Coast assumption-module edits (.planning/SPEC-scenario-planning.md):
     "healthcare",

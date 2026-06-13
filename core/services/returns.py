@@ -46,6 +46,13 @@ INFLATION_START_YEAR = 1994
 N_SIMS = 1000
 RNG_SEED = 42
 
+# Two-leg collapse for the return glide path (.planning SPEC delta, Phase 5a).
+# "Other" rides the equity proxy (VTSAX) already, so it counts as equity; the fixed
+# leg is bonds + cash. The bond proxy supplies the fixed-leg return even when the
+# user holds no bonds today (terminal glide allocations will).
+EQUITY_CLASSES = frozenset({"US Equity", "Intl Equity", "Other"})
+BOND_PROXY = "VBTLX"
+
 _PERCENTILES = (10, 25, 50, 75, 90)
 
 
@@ -292,14 +299,73 @@ def percentile_bands(sims: np.ndarray, percentiles=_PERCENTILES) -> dict[int, li
 
 
 def suggested_real_return(weighted_avg: pd.Series) -> float:
-    """Median of the per-year weighted-average real returns (as a fraction).
+    """Geometric-mean (CAGR) of the per-year real returns (as a fraction).
 
-    This is the "suggested" single number written into the Forecast rate input.
-    Returns 0.0 for an empty series.
+    The single point estimate fed to the projection / glide legs. **Geometric**, not
+    median or arithmetic mean, because it is the only one of the three that actually
+    reproduces compounded terminal wealth: it nets out volatility drag (a −39% year
+    needs a +64% year to recover, which the arithmetic mean ignores) and is robust
+    to the clustering that makes the median of a ~30-year annual sample jump between
+    high/low groups. For a 97%-equity sample the median read ~9% and the arithmetic
+    mean ~7%, but the wealth-reproducing CAGR is ~5%. Returns 0.0 for an empty series.
     """
     if weighted_avg is None or len(weighted_avg) == 0:
         return 0.0
-    return float(np.median(weighted_avg.to_numpy()))
+    arr = np.asarray(weighted_avg, dtype="float64")
+    arr = arr[~np.isnan(arr)]
+    if arr.size == 0:
+        return 0.0
+    return float(np.prod(1.0 + arr) ** (1.0 / arr.size) - 1.0)
+
+
+def glide_return_params(
+    holdings: list[dict], inflation: pd.Series | None = None
+) -> dict | None:
+    """Two-leg (equity/fixed) parameters for the return glide path.
+
+    Returns ``{"w_equity0", "r_equity", "r_fixed"}`` — the glide's starting equity
+    weight (from the *actual* current portfolio) plus a single real, geometric
+    expected return for each leg, reusing the same holdings-derived series the
+    historic-ranges chart shows:
+
+      * ``w_equity0`` — fraction of the portfolio in equity classes (US/Intl/Other).
+      * ``r_equity``  — median of the value-weighted real returns of the held equity
+        classes; falls back to the ``FALLBACK_TICKER`` (VTSAX) proxy if none resolve.
+      * ``r_fixed``   — median real return of the ``BOND_PROXY``, available even when
+        the user holds no bonds today; falls back to ``CASH_REAL_RETURN`` if the
+        proxy has no usable history.
+
+    Returns ``None`` for empty/zero-value holdings (no portfolio → no glide start).
+    Network-bound (yfinance/cpi) via the cached helpers — call OFF the hot path
+    (it rides inside ``build_returns_payload``).
+    """
+    if inflation is None:
+        inflation = inflation_series()
+
+    weights = portfolio_weights(holdings)
+    if not weights:
+        return None
+
+    w_equity0 = sum(v for cls, v in weights.items() if cls in EQUITY_CLASSES)
+
+    class_series = asset_class_real_returns(holdings, inflation)
+    equity_series = weighted_average_real_returns(
+        {cls: s for cls, s in class_series.items() if cls in EQUITY_CLASSES},
+        {cls: weights.get(cls, 0.0) for cls in EQUITY_CLASSES},
+    )
+    if len(equity_series):
+        r_equity = suggested_real_return(equity_series)
+    else:
+        r_equity = suggested_real_return(real_annual_returns(FALLBACK_TICKER, inflation))
+
+    bond_series = real_annual_returns(BOND_PROXY, inflation)
+    r_fixed = suggested_real_return(bond_series) if len(bond_series) else CASH_REAL_RETURN
+
+    return {
+        "w_equity0": float(w_equity0),
+        "r_equity": float(r_equity),
+        "r_fixed": float(r_fixed),
+    }
 
 
 # ── Orchestration ────────────────────────────────────────────────────────────
@@ -324,6 +390,7 @@ def build_returns_payload(holdings: list[dict]) -> dict:
             "real_return_pool": [],
             "suggested_real_return_pct": 0.0,
             "n_years": 0,
+            "glide": None,
         }
 
     inflation = inflation_series()
@@ -344,6 +411,7 @@ def build_returns_payload(holdings: list[dict]) -> dict:
             "real_return_pool": [],
             "suggested_real_return_pct": 0.0,
             "n_years": 0,
+            "glide": None,
         }
 
     return {
@@ -358,4 +426,5 @@ def build_returns_payload(holdings: list[dict]) -> dict:
         "real_return_pool": [float(x) for x in weighted_avg.to_numpy()],
         "suggested_real_return_pct": round(suggested_real_return(weighted_avg) * 100.0, 2),
         "n_years": int(len(weighted_avg)),
+        "glide": glide_return_params(holdings, inflation),
     }

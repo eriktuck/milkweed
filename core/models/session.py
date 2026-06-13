@@ -40,6 +40,13 @@ class RetirementConfig(BaseModel):
     real_return: float | None = None       # expected real return; default 0.05
     withdrawal_rate: float | None = None    # SWR sanity-check rate; default 0.04
 
+    # Return glide-path strategy (aggressive | moderate | conservative), the Coast
+    # rate-of-return card's primary control (.planning SPEC delta, Phase 5a). When
+    # set with live portfolio holdings, scenario.build_scenario derives a target-date
+    # glide (current equity weight → preset terminal) and ignores `real_return`;
+    # `real_return` survives as the displayed effective CAGR. Absent → flat rate.
+    return_strategy: str | None = None
+
     # Per-csp-key phase multiplier overrides. Shape:
     #   {csp_key: {"slow_go": 0.9, "no_go": 0.7}}  (go-go is always 1.0)
     # Absent keys fall back to PHASE_FACTORS in the service (seeded from research).

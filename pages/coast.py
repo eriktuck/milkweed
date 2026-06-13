@@ -56,6 +56,11 @@ from core.services.returns import (
     build_returns_payload,
     percentile_bands,
 )
+from core.services.glide import (
+    DEFAULT_STRATEGY,
+    STRATEGY_LABELS,
+    STRATEGY_TERMINAL_EQUITY,
+)
 from core.services.scenario import DEFAULT_COAST_AGE, build_scenario
 
 dash.register_page(__name__, path="/coast")
@@ -435,26 +440,36 @@ _chart_card = dbc.Card(dbc.CardBody([
 
 # ── Assumption module 1: Rate of return ──────────────────────────────────────────
 
+_STRATEGY_OPTIONS = [
+    {"label": f"{STRATEGY_LABELS[k]} ({int(w * 100)}% equity at retirement)", "value": k}
+    for k, w in STRATEGY_TERMINAL_EQUITY.items()
+]
+
 _rate_module = _module(
     "co-rr", "fa-percent", "Rate of return", "co-rr-summary",
     body=[
         html.P(
-            "Historical, inflation-adjusted context for the return that drives the "
-            "projection above — grounded in your own asset mix. Markets are stochastic; "
-            "the simulation shows a range of likely outcomes, not a guarantee.",
+            "Your return isn't one number — it follows your asset mix, which de-risks "
+            "toward retirement like a target-date fund. Pick how much equity risk to "
+            "carry: aggressive aims for a bigger nest egg, conservative locks in what "
+            "you have. The glide starts from your portfolio's current equity weight. "
+            "Markets are stochastic; the simulation shows a range of outcomes, not a "
+            "guarantee.",
             className="text-muted small mb-3",
         ),
         dbc.Row([
             dbc.Col([
-                dbc.Label("Expected real return", className="ban-label mb-1"),
-                dbc.InputGroup([
-                    dbc.Input(id="co-real-return", type="number", value=5.0,
-                              min=0, max=15, step=0.5, size="sm"),
-                    dbc.InputGroupText("%"),
-                ], size="sm"),
-                dbc.Switch(id="co-use-suggested", label="Use suggested rate",
-                           value=False, className="small mt-2"),
-                html.Small(id="co-suggested-hint", className="text-muted"),
+                dbc.Label("Strategy", className="ban-label mb-1"),
+                dbc.RadioItems(
+                    id="co-strategy", options=_STRATEGY_OPTIONS, value=DEFAULT_STRATEGY,
+                    className="small", inputClassName="me-1", labelClassName="mb-1",
+                ),
+                html.Div([
+                    html.P("Equity glide to retirement", className="text-muted small mb-1 mt-2"),
+                    dcc.Loading(dcc.Graph(id="co-rr-glide-chart",
+                                          config={"displayModeBar": False}), type="circle"),
+                    html.P(id="co-rr-glide-note", className="text-muted small mt-1 mb-0"),
+                ]),
             ], lg=3),
             dbc.Col([
                 html.P("Historical real (inflation-adjusted) returns by asset class, with inflation",
@@ -471,7 +486,7 @@ _rate_module = _module(
             ], lg=4),
         ], className="g-3"),
         html.Div([
-            dbc.Button("Save rate", id="co-rr-save", color="primary", size="sm",
+            dbc.Button("Save strategy", id="co-rr-save", color="primary", size="sm",
                        outline=True),
             html.Span(id="co-rr-save-status", className="small ms-2"),
         ], className="mt-2"),
@@ -712,7 +727,7 @@ _module_toggle("co-inc")
     Output("co-monthly", "value"),
     Output("co-contribution-hint", "children"),
     Output("co-meta", "children"),
-    Output("co-real-return", "value"),
+    Output("co-strategy", "value"),
     Input("config-store", "data"),
     Input("use-case", "value"),
 )
@@ -748,9 +763,9 @@ def seed_inputs(config_data, use_case):
     meta = (f"Age {current_age} · planning to {death_age}" if has_birth
             else f"Set your birth date on the Profile page (assuming age {current_age})")
 
-    real_return_pct = round(float(a["real_return"]) * 100.0, 1)
+    strategy = (user_cfg.get("retirement") or {}).get("return_strategy") or DEFAULT_STRATEGY
 
-    return lo, hi, marks, value, round(monthly, 2), hint, meta, real_return_pct
+    return lo, hi, marks, value, round(monthly, 2), hint, meta, strategy
 
 
 # ── Module 2 seeds: expenses table + healthcare inputs from config ────────────────
@@ -1019,6 +1034,8 @@ def save_income(n, al_taxable, al_trad, al_roth, ss_pia, gain_frac, config_data,
     Output("co-ban-required", "children"),
     Output("co-projection-chart", "figure"),
     Output("co-rr-summary", "children"),
+    Output("co-rr-glide-chart", "figure"),
+    Output("co-rr-glide-note", "children"),
     Output("co-glide-chart", "figure"),
     Output("co-glide-note", "children"),
     Output("co-exp-totals", "children"),
@@ -1030,7 +1047,8 @@ def save_income(n, al_taxable, al_trad, al_roth, ss_pia, gain_frac, config_data,
     Input("co-milestones", "value"),
     Input("co-monthly", "value"),
     Input("co-color-mode", "value"),
-    Input("co-real-return", "value"),
+    Input("co-strategy", "value"),
+    Input("co-returns-store", "data"),
     Input("co-exp-table", "data"),
     Input("co-hc-aca", "value"),
     Input("co-hc-medicare", "value"),
@@ -1047,7 +1065,7 @@ def save_income(n, al_taxable, al_trad, al_roth, ss_pia, gain_frac, config_data,
     Input("config-store", "data"),
     Input("use-case", "value"),
 )
-def recompute(milestones, monthly, color_mode, real_return, exp_rows,
+def recompute(milestones, monthly, color_mode, strategy, returns_store, exp_rows,
               hc_aca, hc_medicare, hc_ltc, hc_ltc_age,
               bal_taxable, bal_trad, bal_roth, al_taxable, al_trad, al_roth,
               ss_pia, gain_frac, config_data, use_case):
@@ -1070,8 +1088,10 @@ def recompute(milestones, monthly, color_mode, real_return, exp_rows,
     else:
         buckets = balances_by_tax_bucket(uid, user_cfg.get("investment_accounts"))
 
-    # Live real-return override from the rate-of-return module (None → config default).
-    r_override = float(real_return) / 100.0 if real_return is not None else None
+    # Return glide path from the rate-of-return module: the chosen strategy + the
+    # holdings-derived two-leg params (parked in co-returns-store off the hot path).
+    # No holdings/params → build_scenario falls back to the config flat rate.
+    glide_params = (returns_store or {}).get("glide")
 
     # Live expenses + healthcare overrides from the Expenses module. The table drives
     # the spend stream; None (table not seeded yet) → build_scenario's CSP-derived
@@ -1092,11 +1112,16 @@ def recompute(milestones, monthly, color_mode, real_return, exp_rows,
         monthly_contribution=float(monthly or 0),
         coast_age=coast_age, retirement_age=retirement_age, claim_age=claim_age,
         slow_go_age=slow_go_age, no_go_age=no_go_age,
-        real_return=r_override,
+        return_strategy=strategy, glide_params=glide_params,
         spend_by_phase=spend_override, healthcare_overrides=hc_overrides,
         allocation=alloc_override, pia_annual=pia_override, gain_fraction=gain_override,
     )
-    rr_summary = f"{s.real_return * 100:.1f}% real"
+    if s.return_strategy:
+        rr_summary = f"{STRATEGY_LABELS[s.return_strategy]} glide · {s.real_return * 100:.1f}% real"
+    else:
+        rr_summary = f"{s.real_return * 100:.1f}% real"
+    rr_glide_fig = _glide_path_figure(s.equity_glide)
+    rr_glide_note = _glide_path_note(s, glide_params)
 
     # ── BANs: goal → coast target → projected-at-coast → required monthly ─────────
     ban_goal = _ban("Nest-egg goal", _money(s.nest_egg_goal))
@@ -1155,6 +1180,7 @@ def recompute(milestones, monthly, color_mode, real_return, exp_rows,
     inc_summary = f"SS {_money(ss_monthly)}/mo at {claim_age}"
 
     return (chips, ban_goal, ban_target, ban_status, ban_required, fig, rr_summary,
+            rr_glide_fig, rr_glide_note,
             glide, glide_note, totals, note, exp_summary,
             cashflow, income_summary, inc_summary)
 
@@ -1379,26 +1405,6 @@ def compute_returns_data(config_data, use_case):
 
 
 @callback(
-    Output("co-real-return", "value", allow_duplicate=True),
-    Output("co-real-return", "disabled"),
-    Output("co-suggested-hint", "children"),
-    Input("co-use-suggested", "value"),
-    Input("co-returns-store", "data"),
-    prevent_initial_call=True,
-)
-def apply_suggested_rate(use_suggested, store):
-    """Fill the real-return input with the holdings-suggested median when toggled on
-    (and lock it); re-enable manual editing when off. No loop: co-real-return.value is
-    not an Input here."""
-    if use_suggested and store and store.get("ok"):
-        pct = store.get("suggested_real_return_pct", 0.0)
-        return pct, True, f"using suggested median ({pct:.1f}% real)"
-    if use_suggested:
-        return dash.no_update, False, "no suggestion available — add holdings"
-    return dash.no_update, False, ""
-
-
-@callback(
     Output("co-class-returns-chart", "figure"),
     Input("co-returns-store", "data"),
 )
@@ -1450,7 +1456,8 @@ def render_fan_chart(store, milestones, monthly, config_data, use_case):
     caption = (
         f"1,000 bootstrap simulations resampling {n_years} years of your portfolio's "
         f"real returns. Bands show the 10th–90th and 25th–75th (IQR) percentiles; the "
-        f"line is the median outcome at age {retirement_age}."
+        f"line is the median outcome at age {retirement_age}. Reflects today's asset "
+        f"mix — strategy-aware bands that de-risk along the glide are coming."
     )
     return fig, caption
 
@@ -1459,26 +1466,25 @@ def render_fan_chart(store, milestones, monthly, config_data, use_case):
     Output("config-store", "data", allow_duplicate=True),
     Output("co-rr-save-status", "children"),
     Input("co-rr-save", "n_clicks"),
-    State("co-real-return", "value"),
+    State("co-strategy", "value"),
     State("config-store", "data"),
     State("use-case", "value"),
     prevent_initial_call=True,
 )
-def save_rate(n, real_return, config_data, use_case):
-    """Persist the real return to RetirementConfig (stored as a fraction) and mirror
-    it into config-store so the in-session view matches Firestore without a reload."""
+def save_rate(n, strategy, config_data, use_case):
+    """Persist the return-glide strategy to RetirementConfig and mirror it into
+    config-store so the in-session view matches Firestore without a reload."""
     if not n:
         raise dash.exceptions.PreventUpdate
     uid = _selected_uid(use_case)
-    if not uid or not config_data or real_return is None:
+    if not uid or not config_data or strategy not in STRATEGY_TERMINAL_EQUITY:
         raise dash.exceptions.PreventUpdate
 
-    r = float(real_return) / 100.0
-    save_retirement_config(uid, {"real_return": r})
+    save_retirement_config(uid, {"return_strategy": strategy})
 
     cfg = json.loads(config_data)
     ret_cfg = cfg.setdefault("users", {}).setdefault(uid, {}).setdefault("retirement", {})
-    ret_cfg["real_return"] = r
+    ret_cfg["return_strategy"] = strategy
     return json.dumps(cfg), dbc.Badge("Saved", color="success", className="ms-1")
 
 
@@ -1494,6 +1500,44 @@ def _detail_empty(message: str) -> go.Figure:
                       "font": {"color": "#999", "size": 13}}] if message else [],
     )
     return fig
+
+
+def _glide_path_figure(equity_glide: dict | None) -> go.Figure:
+    """Small area chart of equity weight (%) over the accumulation years — the
+    target-date glide the chosen strategy implies, anchored at the portfolio's
+    current equity weight. Empty prompt when there is no glide (no holdings)."""
+    if not equity_glide:
+        return _detail_empty("Add holdings on the Investments page to anchor the glide.")
+    ages = sorted(int(a) for a in equity_glide.keys())
+    eq = [float(equity_glide[a]) * 100.0 for a in ages]
+    fig = go.Figure(go.Scatter(
+        x=ages, y=eq, mode="lines", fill="tozeroy",
+        line=dict(width=2.5, color="#6aae9a"), fillcolor="rgba(120,194,173,0.15)",
+        hovertemplate="Age %{x}<br>%{y:.0f}% equity<extra></extra>",
+    ))
+    fig.update_layout(
+        **_CHART_LAYOUT, height=150, showlegend=False,
+        margin=dict(l=10, r=10, t=10, b=10),
+        xaxis=dict(title=None),
+        yaxis=dict(range=[0, 100], ticksuffix="%", title=None),
+    )
+    return fig
+
+
+def _glide_path_note(s, glide_params) -> str:
+    """One-line readout under the glide chart: the equity path + the effective real
+    CAGR it produces, and the two leg returns it blends."""
+    if not s.return_strategy or not s.equity_glide or not glide_params:
+        return "Flat rate — add holdings and pick a strategy to model a target-date glide."
+    ages = sorted(int(a) for a in s.equity_glide.keys())
+    w0 = float(s.equity_glide[ages[0]]) * 100.0
+    w_term = STRATEGY_TERMINAL_EQUITY[s.return_strategy] * 100.0
+    r_eq = float(glide_params.get("r_equity", 0.0)) * 100.0
+    r_fx = float(glide_params.get("r_fixed", 0.0)) * 100.0
+    path = (f"holds {w0:.0f}% equity" if w0 <= w_term + 1e-9
+            else f"{w0:.0f}% → {w_term:.0f}% equity")
+    return (f"{path} · ≈{s.real_return * 100:.1f}% real "
+            f"(blending {r_eq:.1f}% equity / {r_fx:.1f}% bonds)")
 
 
 def _class_returns_figure(store) -> go.Figure:
