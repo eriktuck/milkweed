@@ -39,6 +39,8 @@ from core.services.retirement import (
     PHASES,
     annual_spend_by_phase,
     balances_by_tax_bucket,
+    household_expense_share,
+    merge_household_expenses,
     phase_for_age,
     resolve_assumptions,
     resolve_phase_factors,
@@ -196,22 +198,64 @@ def _group_header_row(label: str) -> dict:
             "go_go": "", "slow_go": "", "no_go": "", "factor": ""}
 
 
-def _seed_expense_rows(user_cfg) -> list[dict]:
+def _household_for(config, uid):
+    """(household_cfg, member_uids) for the household containing `uid`, else
+    (None, [uid]). The household is the config-store `users` entry with a `members`
+    list (ported from pages/retirement.py)."""
+    for cfg in (config.get("users") or {}).values():
+        members = cfg.get("members")
+        if members and uid in members:
+            return cfg, members
+    return None, [uid]
+
+
+def _effective_expense_plan(config, uid):
+    """The individual's retirement expense plan with their share of household shared
+    costs folded in (ported from pages/retirement.py).
+
+    Returns (plan, csp_labels, share): `plan` is the monthly {csp_key: amount} map
+    (own plan + share × household plan per key), `csp_labels` merges household labels
+    under the individual's, and `share` is this member's household-expense fraction
+    (0.0 when not in a household). Only individuals retire, so household shared costs
+    are attributed per member by joint-contribution share; downstream
+    `annual_spend_by_phase` drops the funding transfer so nothing double-counts.
+    """
+    users = config.get("users") or {}
+    user_cfg = users.get(uid) or {}
+    labels = dict(user_cfg.get("csp_labels") or {})
+    plan = _active_plan(user_cfg)
+
+    household_cfg, member_ids = _household_for(config, uid)
+    if household_cfg is None:
+        return plan, labels, 0.0
+
+    contribs = {
+        m: float(_active_plan(users.get(m, {})).get("joint_contribution", 0.0))
+        for m in member_ids if m in users
+    }
+    share = household_expense_share(contribs, uid)
+    plan = merge_household_expenses(plan, _active_plan(household_cfg), share)
+    labels = {**(household_cfg.get("csp_labels") or {}), **labels}
+    return plan, labels, share
+
+
+def _seed_expense_rows(config, uid) -> list[dict]:
     """One editable monthly row per living-expense csp key, seeded from the CSP plan
     (go-go) × research multipliers (slow-go/no-go), with saved edits applied on top.
 
-    Single-individual scope (no household fold — see the spec's open questions):
-    the row set, ordering and per-row factor hint come from the user's own latest
-    CSP plan via `annual_spend_by_phase`; any persisted `RetirementConfig.expenses`
-    override the cell values so edits survive reloads. Rows are grouped by CSP label
-    (Fixed → Investments → Sinking → Guilt Free) then the user's `cat_order`, with a
-    divider row per group.
+    The plan folds in this individual's share of household shared expenses (see
+    `_effective_expense_plan`) — only individuals retire, so household costs are
+    attributed per member by joint-contribution share. The row set, ordering and
+    per-row factor hint come from `annual_spend_by_phase`; any persisted
+    `RetirementConfig.expenses` override the cell values so edits survive reloads.
+    Rows are grouped by CSP label (Fixed → Investments → Sinking → Guilt Free) then
+    the user's `cat_order`, with a divider row per group.
     """
-    active_plan = _active_plan(user_cfg)
-    csp_labels = user_cfg.get("csp_labels") or {}
-    factors = resolve_phase_factors((user_cfg or {}).get("retirement"))
+    user_cfg = (config.get("users") or {}).get(uid) or {}
+    active_plan, csp_labels, _share = _effective_expense_plan(config, uid)
+    factors = resolve_phase_factors(user_cfg.get("retirement"))
     by_phase = annual_spend_by_phase(active_plan, csp_labels, factors)
-    saved = ((user_cfg or {}).get("retirement") or {}).get("expenses") or {}
+    saved = (user_cfg.get("retirement") or {}).get("expenses") or {}
 
     rows = []
     for key in by_phase["go_go"]["by_key"]:
@@ -618,10 +662,13 @@ def seed_inputs(config_data, use_case):
     Input("use-case", "value"),
 )
 def seed_expenses(config_data, use_case):
-    user_cfg = _user_cfg(config_data, _selected_uid(use_case))
-    if user_cfg is None:
+    uid = _selected_uid(use_case)
+    if not config_data or not isinstance(config_data, str) or not uid:
         raise dash.exceptions.PreventUpdate
-    return _seed_expense_rows(user_cfg)
+    config = json.loads(config_data)
+    if uid not in (config.get("users") or {}):
+        raise dash.exceptions.PreventUpdate
+    return _seed_expense_rows(config, uid)
 
 
 @callback(
@@ -811,8 +858,12 @@ def recompute(milestones, monthly, color_mode, real_return, exp_rows,
     totals = (f"Annual: go-go {_money(spend['go_go'])} · slow-go {_money(spend['slow_go'])} "
               f"· no-go {_money(spend['no_go'])}")
     n_rows = sum(1 for r in (exp_rows or []) if r.get("key"))
-    note = (f"{n_rows} living-expense categories from your CSP plan, stepping down at each "
-            "phase boundary. Healthcare is modelled separately below."
+    # Note the folded-in share of household shared expenses (see _effective_expense_plan)
+    # so the seeded totals aren't a mystery for a member of a household.
+    share = _effective_expense_plan(json.loads(config_data), uid)[2] if config_data else 0.0
+    share_bit = f" (incl. your {share:.0%} share of household expenses)" if share else ""
+    note = (f"{n_rows} living-expense categories from your CSP plan{share_bit}, stepping down "
+            "at each phase boundary. Healthcare is modelled separately below."
             ) if n_rows else "No CSP plan found — add one on the CSP page to seed these expenses."
     health = {int(k): float(v) for k, v in
               (s.healthcare_by_age.to_dict() if s.healthcare_by_age is not None else {}).items()}
