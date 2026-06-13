@@ -299,6 +299,9 @@ RETIREMENT_FIELDS = (
     "healthcare",
     "ltc_type",
     "expenses",
+    "pia_annual",
+    "gain_fraction",
+    "contribution_allocation",
 )
 
 

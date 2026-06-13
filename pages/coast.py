@@ -37,13 +37,19 @@ from core.services.retirement import (
     LTC_DEFAULT_TYPE,
     MEDICARE_PART_B_MONTHLY_2025,
     PHASES,
+    TAXABLE_GAIN_FRACTION,
+    annual_pia_from_earnings,
     annual_spend_by_phase,
     balances_by_tax_bucket,
+    default_contribution_allocation,
+    estimate_annual_pia_from_income,
     household_expense_share,
     merge_household_expenses,
     phase_for_age,
     resolve_assumptions,
     resolve_phase_factors,
+    rmd_start_age,
+    taxable_gain_fraction,
 )
 from core.services.returns import (
     bootstrap_projection,
@@ -139,6 +145,18 @@ def _money_input(id_, **kw):
     """$-prefixed numeric input (mirrors pages/retirement.py)."""
     return dbc.InputGroup([dbc.InputGroupText("$"),
                            dbc.Input(id=id_, type="number", size="sm", **kw)], size="sm")
+
+
+def _bucket_inputs(prefix, step):
+    """Stacked Taxable / Tax-deferred / Roth money inputs sharing an id prefix."""
+    return dbc.Row([
+        dbc.Col([dbc.Label("Taxable", className="small text-muted mb-1"),
+                 _money_input(f"{prefix}-taxable", value=0, min=0, step=step)], width=12),
+        dbc.Col([dbc.Label("Tax-deferred", className="small text-muted mb-1"),
+                 _money_input(f"{prefix}-trad", value=0, min=0, step=step)], width=12),
+        dbc.Col([dbc.Label("Roth", className="small text-muted mb-1"),
+                 _money_input(f"{prefix}-roth", value=0, min=0, step=step)], width=12),
+    ], className="g-2")
 
 
 # ── Expenses + healthcare constants/helpers (ported from pages/retirement.py) ─────
@@ -569,6 +587,85 @@ _expenses_module = _module(
 )
 
 
+# ── Assumption module 3: Income & tax planning ───────────────────────────────────
+
+_income_module = _module(
+    "co-inc", "fa-landmark", "Income & tax planning", "co-inc-summary",
+    body=[
+        html.P([
+            "Social Security and account withdrawals fund the spending above. The lifetime "
+            "walk withdraws taxable → tax-deferred → Roth with ", html.B("RMDs"),
+            " forced from the tax-deferred balance, and flat planning-grade taxes "
+            "(ordinary + long-term capital gains).",
+        ], className="text-muted small mb-3"),
+        dbc.Row([
+            dbc.Col([
+                html.P("Current balances", className="small fw-bold mb-2"),
+                _bucket_inputs("co-bal", 1000),
+                html.Small(id="co-bal-hint", className="text-muted"),
+            ], lg=4),
+            dbc.Col([
+                html.P("Annual contribution split", className="small fw-bold mb-2"),
+                _bucket_inputs("co-alloc", 500),
+                html.Small(id="co-alloc-hint", className="text-muted"),
+            ], lg=4),
+            dbc.Col([
+                html.P("Social Security & taxes", className="small fw-bold mb-2"),
+                dbc.Row([
+                    dbc.Col([dbc.Label("Current gross income, $/yr", className="small text-muted mb-1"),
+                             _money_input("co-ss-income", value=0, min=0, step=1000),
+                             html.Small(id="co-ss-income-hint", className="text-warning")], width=12),
+                ], className="g-2"),
+                dbc.Row([
+                    dbc.Col([dbc.Label("Employment", className="small text-muted mb-1"),
+                             dbc.Select(id="co-ss-emptype", size="sm",
+                                        options=[{"label": "W-2", "value": "W2"},
+                                                 {"label": "1099 (self-emp.)", "value": "1099"},
+                                                 {"label": "Mixed", "value": "mixed"}],
+                                        value="W2")], width=6),
+                    dbc.Col([dbc.Label("Career yrs", className="small text-muted mb-1"),
+                             dbc.Input(id="co-ss-career", type="number", value=35, min=1,
+                                       max=50, step=1, size="sm")], width=6),
+                ], className="g-2 mt-1"),
+                dbc.Row([
+                    dbc.Col([dbc.Label("SS benefit at FRA (67), $/yr", className="small text-muted mb-1"),
+                             _money_input("co-ss-pia", value=0, min=0, step=500),
+                             html.Small(id="co-ss-hint", className="text-muted")], width=6),
+                    dbc.Col([dbc.Label("Taxable gain %", className="small text-muted mb-1"),
+                             dbc.InputGroup([
+                                 dbc.Input(id="co-gain-frac", type="number",
+                                           value=int(TAXABLE_GAIN_FRACTION * 100),
+                                           min=0, max=100, step=5, size="sm"),
+                                 dbc.InputGroupText("%")], size="sm"),
+                             html.Small(id="co-gain-hint", className="text-muted")], width=6),
+                ], className="g-2 mt-1"),
+                html.Small("Claim age is the SS handle on the milestone slider above.",
+                           className="text-muted d-block mt-1"),
+            ], lg=4),
+        ], className="g-3 mb-3"),
+
+        dbc.Row([
+            dbc.Col(html.Div(id="co-income-summary"), lg=4),
+            dbc.Col(dbc.Card(dbc.CardBody([
+                html.P("Annual cash flow — Social Security floor vs. portfolio draw",
+                       className="text-muted small mb-2"),
+                dcc.Loading(dcc.Graph(id="co-cashflow-chart",
+                                      config={"displayModeBar": False}), type="circle"),
+                html.P("Social Security is the guaranteed floor; the portfolio fills the gap. "
+                       "Forced RMDs can spike taxable draws late (the excess is reinvested, "
+                       "not spent).", className="text-muted small mt-2 mb-0"),
+            ]), color="light"), lg=8),
+        ], className="g-3"),
+
+        html.Div([
+            dbc.Button("Save income & tax", id="co-inc-save", color="primary",
+                       size="sm", outline=True),
+            html.Span(id="co-inc-save-status", className="small ms-2"),
+        ], className="mt-3"),
+    ],
+)
+
+
 # ── Page layout ──────────────────────────────────────────────────────────────────
 
 layout = html.Div(dbc.Container([
@@ -593,6 +690,7 @@ layout = html.Div(dbc.Container([
             style={"fontSize": ".72rem", "letterSpacing": ".1em"}),
     _rate_module,
     _expenses_module,
+    _income_module,
     html.P([html.I(className="fas fa-circle-info me-1"),
             "Editing any assumption re-runs the scenario above — the chart and BANs "
             "update live."], className="assist-note mt-2"),
@@ -603,6 +701,7 @@ layout = html.Div(dbc.Container([
 
 _module_toggle("co-rr")
 _module_toggle("co-exp")
+_module_toggle("co-inc")
 
 
 @callback(
@@ -765,6 +864,151 @@ def save_expenses(n, rows, hc_aca, hc_medicare, ltc_type, hc_ltc, hc_ltc_age,
     return json.dumps(cfg), dbc.Badge("Saved", color="success", className="ms-1")
 
 
+# ── Module 3 seeds: balances, allocation, Social Security income, gain % ──────────
+
+@callback(
+    Output("co-bal-taxable", "value"),
+    Output("co-bal-trad", "value"),
+    Output("co-bal-roth", "value"),
+    Output("co-bal-hint", "children"),
+    Output("co-ss-income", "value"),
+    Output("co-ss-income-hint", "children"),
+    Output("co-gain-frac", "value"),
+    Output("co-gain-hint", "children"),
+    Input("config-store", "data"),
+    Input("use-case", "value"),
+)
+def seed_income(config_data, use_case):
+    """Seed current balances (from holdings), the gross-income line (from the CSP
+    income plan), and the taxable-gain % (from the cost-basis report) — all editable
+    overrides (ported from pages/retirement.py seed_income)."""
+    uid = _selected_uid(use_case)
+    user_cfg = _user_cfg(config_data, uid)
+    if user_cfg is None:
+        raise dash.exceptions.PreventUpdate
+    accounts = user_cfg.get("investment_accounts")
+
+    buckets = balances_by_tax_bucket(uid, accounts)
+    bal_hint = (f"auto-filled from your holdings ({_money(buckets['total'])} total) — editable"
+                if buckets["total"] > 0 else "no holdings found — enter your current balances")
+
+    active_plan = _active_plan(user_cfg)
+    csp_labels = user_cfg.get("csp_labels") or {}
+    annual_income = 12.0 * sum(float(a) for cat, a in active_plan.items()
+                               if csp_labels.get(cat) == "income")
+    income_hint = (f"seeded from your CSP income ({_money(annual_income)}/yr) — likely net; "
+                   "enter gross for accuracy" if annual_income > 0
+                   else "enter your current gross annual income to estimate Social Security")
+
+    derived = taxable_gain_fraction(uid, accounts)
+    if derived is not None:
+        gain_pct = round(derived * 100)
+        gain_hint = f"derived from your cost-basis report ({gain_pct}% gain) — editable"
+    else:
+        gain_pct = int(TAXABLE_GAIN_FRACTION * 100)
+        gain_hint = "default — upload your Vanguard cost-basis CSV to derive this"
+
+    return (round(buckets["taxable"]), round(buckets["trad"]), round(buckets["roth"]), bal_hint,
+            round(annual_income), income_hint, gain_pct, gain_hint)
+
+
+@callback(
+    Output("co-alloc-taxable", "value"),
+    Output("co-alloc-trad", "value"),
+    Output("co-alloc-roth", "value"),
+    Output("co-alloc-hint", "children"),
+    Input("config-store", "data"),
+    Input("use-case", "value"),
+    Input("co-monthly", "value"),
+)
+def seed_allocation(config_data, use_case, monthly):
+    """Split the annual contribution tax-advantaged-first across buckets, preferring a
+    persisted RetirementConfig.contribution_allocation. Re-seeds when the monthly
+    contribution changes so the split tracks it; each bucket stays editable."""
+    user_cfg = _user_cfg(config_data, _selected_uid(use_case))
+    if user_cfg is None:
+        raise dash.exceptions.PreventUpdate
+    annual = float(monthly or 0) * 12.0
+    saved = (user_cfg.get("retirement") or {}).get("contribution_allocation")
+    alloc = saved if saved else default_contribution_allocation(annual)
+    hint = ("tax-advantaged-first split of your contribution — editable" if annual > 0
+            else "set a monthly contribution above to split")
+    return round(alloc.get("taxable", 0)), round(alloc.get("trad", 0)), round(alloc.get("roth", 0)), hint
+
+
+@callback(
+    Output("co-ss-pia", "value"),
+    Output("co-ss-hint", "children"),
+    Input("co-ss-income", "value"),
+    Input("co-ss-emptype", "value"),
+    Input("co-ss-career", "value"),
+    Input("config-store", "data"),
+    Input("use-case", "value"),
+)
+def estimate_ss(gross_income, employment_type, career_years, config_data, use_case):
+    """Estimate the SS benefit at FRA, preferring the Profile income history
+    (income_segments → top-35 PIA), else the constant-income estimate. The field
+    stays an editable SSA-statement override (ported from pages/retirement.py)."""
+    emptype = employment_type or "W2"
+    user_cfg = _user_cfg(config_data, _selected_uid(use_case)) or {}
+    segments = user_cfg.get("income_segments")
+
+    if segments:
+        earnings = functions.segments_to_annual_income(segments)
+        pia = annual_pia_from_earnings(earnings, emptype)
+        n = int((earnings > 0).sum())
+        hint = (f"estimated from your Profile income history ({n} year{'' if n == 1 else 's'}) — "
+                "edit on the Profile page, or type your SSA figure to override")
+        return round(pia), hint
+
+    income = _num(gross_income)
+    years = int(career_years) if career_years else 35
+    pia = estimate_annual_pia_from_income(income, emptype, years)
+    if income > 0:
+        kind = {"1099": "1099 self-employment", "mixed": "mixed"}.get(emptype, "W-2")
+        hint = (f"estimated from {_money(income)}/yr {kind} over {years} yrs — add income "
+                "history on the Profile page, or type your SSA figure to override")
+    else:
+        hint = "enter gross income, add Profile income history, or type your SSA figure"
+    return round(pia), hint
+
+
+@callback(
+    Output("config-store", "data", allow_duplicate=True),
+    Output("co-inc-save-status", "children"),
+    Input("co-inc-save", "n_clicks"),
+    State("co-alloc-taxable", "value"),
+    State("co-alloc-trad", "value"),
+    State("co-alloc-roth", "value"),
+    State("co-ss-pia", "value"),
+    State("co-gain-frac", "value"),
+    State("config-store", "data"),
+    State("use-case", "value"),
+    prevent_initial_call=True,
+)
+def save_income(n, al_taxable, al_trad, al_roth, ss_pia, gain_frac, config_data, use_case):
+    """Persist the contribution allocation, SS benefit (PIA) and taxable-gain fraction
+    to RetirementConfig and mirror into config-store."""
+    if not n:
+        raise dash.exceptions.PreventUpdate
+    uid = _selected_uid(use_case)
+    if not uid or not config_data:
+        raise dash.exceptions.PreventUpdate
+
+    payload = {
+        "contribution_allocation": {"taxable": _num(al_taxable), "trad": _num(al_trad),
+                                    "roth": _num(al_roth)},
+        "pia_annual": _num(ss_pia),
+        "gain_fraction": (_num(gain_frac) or 0.0) / 100.0,
+    }
+    save_retirement_config(uid, payload)
+
+    cfg = json.loads(config_data)
+    ret_cfg = cfg.setdefault("users", {}).setdefault(uid, {}).setdefault("retirement", {})
+    ret_cfg.update(payload)
+    return json.dumps(cfg), dbc.Badge("Saved", color="success", className="ms-1")
+
+
 # ── Recompute: BANs + chart from build_scenario ──────────────────────────────────
 
 @callback(
@@ -780,6 +1024,9 @@ def save_expenses(n, rows, hc_aca, hc_medicare, ltc_type, hc_ltc, hc_ltc_age,
     Output("co-exp-totals", "children"),
     Output("co-exp-note", "children"),
     Output("co-exp-summary", "children"),
+    Output("co-cashflow-chart", "figure"),
+    Output("co-income-summary", "children"),
+    Output("co-inc-summary", "children"),
     Input("co-milestones", "value"),
     Input("co-monthly", "value"),
     Input("co-color-mode", "value"),
@@ -789,11 +1036,21 @@ def save_expenses(n, rows, hc_aca, hc_medicare, ltc_type, hc_ltc, hc_ltc_age,
     Input("co-hc-medicare", "value"),
     Input("co-hc-ltc", "value"),
     Input("co-hc-ltc-age", "value"),
+    Input("co-bal-taxable", "value"),
+    Input("co-bal-trad", "value"),
+    Input("co-bal-roth", "value"),
+    Input("co-alloc-taxable", "value"),
+    Input("co-alloc-trad", "value"),
+    Input("co-alloc-roth", "value"),
+    Input("co-ss-pia", "value"),
+    Input("co-gain-frac", "value"),
     Input("config-store", "data"),
     Input("use-case", "value"),
 )
 def recompute(milestones, monthly, color_mode, real_return, exp_rows,
-              hc_aca, hc_medicare, hc_ltc, hc_ltc_age, config_data, use_case):
+              hc_aca, hc_medicare, hc_ltc, hc_ltc_age,
+              bal_taxable, bal_trad, bal_roth, al_taxable, al_trad, al_roth,
+              ss_pia, gain_frac, config_data, use_case):
     uid = _selected_uid(use_case)
     user_cfg = _user_cfg(config_data, uid)
     if user_cfg is None or not milestones or len(milestones) != 5:
@@ -804,7 +1061,14 @@ def recompute(milestones, monthly, color_mode, real_return, exp_rows,
 
     active_plan = _active_plan(user_cfg)
     csp_labels = user_cfg.get("csp_labels") or {}
-    buckets = balances_by_tax_bucket(uid, user_cfg.get("investment_accounts"))
+
+    # Current balances: the Income module's editable inputs, falling back to the
+    # holdings snapshot before they seed (so the page never flashes a $0 portfolio).
+    bal = {"taxable": _num(bal_taxable), "trad": _num(bal_trad), "roth": _num(bal_roth)}
+    if sum(bal.values()) > 0:
+        buckets = {**bal, "total": sum(bal.values())}
+    else:
+        buckets = balances_by_tax_bucket(uid, user_cfg.get("investment_accounts"))
 
     # Live real-return override from the rate-of-return module (None → config default).
     r_override = float(real_return) / 100.0 if real_return is not None else None
@@ -815,6 +1079,12 @@ def recompute(milestones, monthly, color_mode, real_return, exp_rows,
     spend_override = _spend_from_table(exp_rows) if exp_rows else None
     hc_overrides = _healthcare_overrides(hc_aca, hc_medicare, hc_ltc, hc_ltc_age)
 
+    # Income & tax overrides: contribution split, SS benefit, taxable-gain fraction.
+    alloc = {"taxable": _num(al_taxable), "trad": _num(al_trad), "roth": _num(al_roth)}
+    alloc_override = alloc if sum(alloc.values()) > 0 else None
+    pia_override = _num(ss_pia) if ss_pia is not None else None
+    gain_override = (_num(gain_frac) / 100.0) if gain_frac is not None else None
+
     # Single resolution path: build_scenario merges the live inputs over config.
     # death_age stays config-resolved (the slider owns the 5 milestone handles).
     s = build_scenario(
@@ -824,6 +1094,7 @@ def recompute(milestones, monthly, color_mode, real_return, exp_rows,
         slow_go_age=slow_go_age, no_go_age=no_go_age,
         real_return=r_override,
         spend_by_phase=spend_override, healthcare_overrides=hc_overrides,
+        allocation=alloc_override, pia_annual=pia_override, gain_fraction=gain_override,
     )
     rr_summary = f"{s.real_return * 100:.1f}% real"
 
@@ -874,8 +1145,18 @@ def recompute(milestones, monthly, color_mode, real_return, exp_rows,
     ltc_bit = (f" · LTC from {int(hc_ltc_age)}" if _num(hc_ltc) > 0 else "")
     exp_summary = f"{_money(spend['go_go'])}/yr go-go{ltc_bit}"
 
+    # ── Income & tax module outputs (cash-flow chart + summary) ──────────────────
+    ret_df = s.lifetime[s.lifetime["life_phase"] == "retirement"]
+    cashflow = _cashflow_figure(ret_df, retirement_age, slow_go_age, no_go_age, s.death_age)
+    birth_year = resolve_assumptions(user_cfg).get("birth_year")
+    rmd_start = rmd_start_age(birth_year) if birth_year else 75
+    income_summary = _income_summary_card(ret_df, s.ss_by_age, claim_age, rmd_start)
+    ss_monthly = (float(s.ss_by_age.max()) / 12.0) if len(s.ss_by_age) else 0.0
+    inc_summary = f"SS {_money(ss_monthly)}/mo at {claim_age}"
+
     return (chips, ban_goal, ban_target, ban_status, ban_required, fig, rr_summary,
-            glide, glide_note, totals, note, exp_summary)
+            glide, glide_note, totals, note, exp_summary,
+            cashflow, income_summary, inc_summary)
 
 
 # ── Figure ───────────────────────────────────────────────────────────────────────
@@ -1008,6 +1289,76 @@ def _glide_figure(spend, hc, retirement_age, slow_go_age, no_go_age, death_age) 
         hovermode="x unified", showlegend=True,
     )
     return fig
+
+
+def _cashflow_figure(df, retirement_age, slow_go_age, no_go_age, death_age) -> go.Figure:
+    """Annual cash flow over the (always tax-aware) drawdown: Social Security floor
+    (green) + portfolio draw stacked on top (blue), with the tax line (amber).
+    `df` is the retirement-phase slice of the lifetime walk (ported from
+    pages/retirement.py)."""
+    ages = df.index.tolist()
+    ss = df["income"] if "income" in df.columns else [0] * len(ages)
+    # Portfolio cash funding living = net draw above taxes/reinvested RMD.
+    port = (df["net_spend"] - df["income"]).clip(lower=0) if "net_spend" in df.columns \
+        else df.get("withdrawal", [0] * len(ages))
+    tax = df["tax"] if "tax" in df.columns else None
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=ages, y=ss, mode="lines", name="Social Security",
+        line=dict(width=0, color=_C_GROWTH), stackgroup="cf",
+        fillcolor="rgba(74,222,128,0.35)",
+        hovertemplate="Age %{x}<br>Social Security %{y:$,.0f}<extra></extra>",
+    ))
+    fig.add_trace(go.Scatter(
+        x=ages, y=port, mode="lines", name="Portfolio draw",
+        line=dict(width=0, color="#7fb3f5"), stackgroup="cf",
+        fillcolor="rgba(127,179,245,0.40)",
+        hovertemplate="Age %{x}<br>Portfolio %{y:$,.0f}<extra></extra>",
+    ))
+    if tax is not None:
+        fig.add_trace(go.Scatter(
+            x=ages, y=tax, mode="lines", name="Tax",
+            line=dict(width=1.6, color=_C_TARGET, dash="dot"),
+            hovertemplate="Age %{x}<br>Tax %{y:$,.0f}<extra></extra>",
+        ))
+    for b in (slow_go_age, no_go_age):
+        fig.add_vline(x=b, line_width=1, line_dash="dot", line_color="#cbd5e1")
+    fig.update_layout(
+        **_CHART_LAYOUT, height=260, margin=dict(l=10, r=10, t=30, b=10),
+        xaxis=dict(title="Age", showgrid=False),
+        yaxis=dict(title=None, tickprefix="$", tickformat="~s", showgrid=True,
+                   gridcolor="#eee", zeroline=False, rangemode="tozero"),
+        hovermode="x unified",
+    )
+    return fig
+
+
+def _income_summary_card(df, ss, claim_age, rmd_start):
+    """Small stat block summarizing the income/tax picture over the drawdown
+    (ported from pages/retirement.py; the Coast walk is always tax-aware)."""
+    if df is None or df.empty:
+        return dbc.Alert("Set your milestone ages to project the drawdown.",
+                         color="light", className="small mb-0")
+    lifetime_tax = float(df["tax"].sum())
+    ss_annual = float(ss.max()) if len(ss) else 0.0
+    first = df.iloc[0]
+    first_draw = float(first["withdrawal"])
+    eff = (float(first["tax"]) / first_draw) if first_draw else 0.0
+
+    def _row(label, value, cls=""):
+        return html.Div([
+            html.Span(label, className="text-muted small"),
+            html.Span(value, className=f"small fw-bold float-end {cls}"),
+        ], className="mb-1")
+
+    return dbc.Card(dbc.CardBody([
+        html.P("Income & tax summary", className="small fw-bold mb-2"),
+        _row(f"SS benefit (claim {claim_age})", f"{_money(ss_annual)}/yr", "text-success"),
+        _row("RMDs begin", f"age {rmd_start}"),
+        _row("First-year tax", f"{_money(first['tax'])} ({eff:.0%})", "text-warning"),
+        _row("Lifetime taxes", _money(lifetime_tax), "text-warning"),
+    ]), className="h-100")
 
 
 # ── Module 1 (Rate of return): returns analytics + suggested rate + save ──────────
