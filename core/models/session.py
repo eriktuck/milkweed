@@ -52,6 +52,33 @@ class RetirementConfig(BaseModel):
     # full tax-aware engine in Phase 6.
     account_balances: Dict[str, float] | None = None
 
+    # ── Coast page assumption-module edits (.planning/SPEC-scenario-planning.md) ──
+    # All optional → core/services defaults apply (no migration; see the class
+    # docstring). The Coast page's collapsible assumption cards persist here via
+    # save_retirement_config, and core/services/scenario.build_scenario reads them
+    # as the per-user defaults for each live input.
+
+    # Healthcare glide overrides (annual real $, per individual). Keys mirror
+    # retirement.healthcare_costs_by_age kwargs: oop_annual, aca_annual,
+    # medicare_annual, ltc_annual, ltc_start_age — plus ltc_type (none/in_home/
+    # nursing) which the UI maps to ltc_annual via LTC_COST_BY_TYPE. Absent keys
+    # fall back to the HC_* constants.
+    healthcare: Dict[str, float] | None = None
+    # Long-term-care type selection (none | in_home | nursing); seeds ltc_annual.
+    ltc_type: str | None = None
+
+    # Social Security benefit at FRA (annual $), overriding the earnings/income-
+    # derived estimate (e.g. typed from an SSA statement). Absent → derived.
+    pia_annual: float | None = None
+
+    # Realized long-term-gain fraction of a taxable withdrawal. Absent → derived
+    # from the cost-basis report, else the TAXABLE_GAIN_FRACTION default.
+    gain_fraction: float | None = None
+
+    # Annual contribution split across buckets {taxable, trad, roth}. Absent → the
+    # tax-advantaged-first default (retirement.default_contribution_allocation).
+    contribution_allocation: Dict[str, float] | None = None
+
 
 class UserConfig(BaseModel):
     accounts: List[str]
