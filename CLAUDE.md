@@ -73,7 +73,9 @@ Firebase initialisation in `core/services/firebase.py` tries three strategies in
 
 ### Dash Page Structure
 
-`app.py` mounts Dash at `/dash/` using `use_pages=True`. Pages register themselves with `dash.register_page(__name__, path=...)`. `protected_layout` renders a fixed left **sidebar** (`components/sidebar.py`) alongside the page content. The sidebar holds the brand, the global **"Viewing as" (`use-case`) dropdown** consumed by most pages, nav links (Actual/CSP/Budget/Investments/Trends/Forecast/Settings), the user actions, and a footer (email + logout). User actions: **Fetch Transactions** (login + transaction modals, handled by `manage_and_handle_modals` in `components/sidebar.py`), **Sync Accounts** and **Upload Investments** (both navigate to the page that owns them — Settings and Investments respectively). The **Settings page** (`pages/settings.py`) is the control surface for editing transaction-account ownership/inclusion/nicknames (Sync Accounts), investment-account type/nickname labels, and deleting investment data.
+`app.py` mounts Dash at `/dash/` using `use_pages=True`. Pages register themselves with `dash.register_page(__name__, path=...)`. `protected_layout` renders a fixed left **sidebar** (`components/sidebar.py`) alongside the page content. The sidebar holds the brand, the global **"Viewing as" (`use-case`) dropdown** consumed by most pages, nav links (Actual/CSP/Budget/Investments/Trends/Coast/Profile/Settings), the user actions, and a footer (email + logout). User actions: **Fetch Transactions** (login + transaction modals, handled by `manage_and_handle_modals` in `components/sidebar.py`), **Sync Accounts** and **Upload Investments** (both navigate to the page that owns them — Settings and Investments respectively). The **Settings page** (`pages/settings.py`) is the control surface for editing transaction-account ownership/inclusion/nicknames (Sync Accounts), investment-account type/nickname labels, and deleting investment data.
+
+**Retirement scenario planning** lives on one page: **Coast** (`pages/coast.py`, `/coast`), which replaced the former split Forecast (accumulation) + Retirement (drawdown) pages. It is a cockpit — a milestone-age slider + monthly-contribution input drive four BANs (nest-egg goal, CoastFIRE target, projected-at-coast, required monthly) and one accumulation→coast→drawdown chart — over three below-the-fold assumption accordion modules (rate of return, expenses + healthcare, income & tax). Every number comes from one call into `core/services/scenario.py::build_scenario`, which resolves all assumptions from `config-store` (`UserConfig` + `RetirementConfig`) plus the live inputs (no cross-page goal handshake). Module edits persist to `RetirementConfig` via `save_retirement_config`. See `.planning/SPEC-scenario-planning.md`.
 
 Shared client-side state uses `dcc.Store` (mounted globally in `protected_layout`, so available on every page):
 - `config-store` (session) — serialised `SessionData` JSON
@@ -105,7 +107,7 @@ Beyond the Dash app, `core/models/` contains a standalone financial modelling li
 - `transactions.py` — `Transactions` wrapper around a DataFrame with filter/aggregate helpers
 - `individual.py`, `household.py`, `business.py`, `healthcare.py`, `portfolio.py`, `retirement.py` — composable entities that produce `pd.Series` projections by year
 
-These models are used in `pages/trends.py` and are intended to back the future retirement planning page. They are independent of Firestore and can be exercised in notebooks.
+These models are used in `pages/trends.py`. They are independent of Firestore and can be exercised in notebooks. (The Coast page's math is the lighter, pure pipeline in `core/services/` — `scenario.py`/`projection.py`/`forecast.py`/`retirement.py` — not this `core/models/` library.)
 
 ## Key Conventions
 

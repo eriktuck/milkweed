@@ -658,13 +658,13 @@ def default_nest_egg_goal(
 ) -> float:
     """The from-config nest-egg goal — the default backward-from-spending PV.
 
-    Single source of the *default* goal math. The Retirement page tunes the same
-    pipeline interactively (editable expense table, healthcare, SS) and overrides
-    this via `retirement-goal-store`; this function gives the Forecast page — and a
-    first-load Retirement page — a real PV-based goal with no page interaction,
-    strictly better than Forecast's old `annual_spend / 4%`.
+    Single source of the *default* goal math. The Coast page tunes the same pipeline
+    interactively (editable expense table, healthcare, SS) through
+    `scenario.build_scenario`, which falls back to this default when a given input is
+    not overridden. Retained as the no-interaction baseline and for
+    `scripts/verify_scenario.py`'s reconciliation.
 
-    Mirrors the Retirement page's defaults:
+    Mirrors the Coast assumption-module defaults:
       * spend — phase totals from the CSP plan (`annual_spend_by_phase`), healthcare
         keys excluded (modelled separately below).
       * healthcare — the module-default ACA-bridge → Medicare → LTC glide

@@ -217,11 +217,11 @@ def forecast_summary(
 ) -> dict:
     """Headline numbers for the BANs.
 
-    `retirement_goal` is the nest egg needed AT retirement — supplied by the
-    Retirement page (the precise backward-from-spending PV) via the shared
-    `retirement-goal-store`, or `retirement.default_nest_egg_goal` when the store
-    is empty. Forecast no longer derives it from `annual_spend / 4%`; its job is to
-    turn that goal into the coast target and the required contribution.
+    `retirement_goal` is the nest egg needed AT retirement (the precise
+    backward-from-spending PV). This helper turns that goal into the coast target
+    and the required contribution. Retained for `scripts/verify_scenario.py`, which
+    reconciles `core.services.scenario.build_scenario` against this legacy summary;
+    the live Coast page reads `build_scenario` directly.
 
     Distinguishes the two CoastFIRE quantities:
       retirement_goal  — nest egg needed AT retirement (given)
