@@ -190,3 +190,18 @@
     font-size: .78rem;
     color: #6c757d;
 }
+
+/* expandable assumption module (accordion-ish row, below the fold) */
+.module-card .module-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    cursor: pointer;
+    padding: .9rem 1.1rem;
+}
+.module-card .module-head .title { font-weight: 600; }
+.module-card .module-head .sub { font-size: .8rem; color: #6c757d; }
+.module-body {
+    border-top: 1px solid #eee;
+    padding: 1rem 1.1rem;
+}
