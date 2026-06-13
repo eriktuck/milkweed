@@ -52,6 +52,7 @@ from core.services.retirement import (
     taxable_gain_fraction,
 )
 from core.services.returns import (
+    bootstrap_glide_projection,
     bootstrap_projection,
     build_returns_payload,
     percentile_bands,
@@ -60,6 +61,7 @@ from core.services.glide import (
     DEFAULT_STRATEGY,
     STRATEGY_LABELS,
     STRATEGY_TERMINAL_EQUITY,
+    equity_weight_path,
 )
 from core.services.scenario import DEFAULT_COAST_AGE, build_scenario
 
@@ -1420,12 +1422,16 @@ def render_class_returns_chart(store):
     Input("co-returns-store", "data"),
     Input("co-milestones", "value"),
     Input("co-monthly", "value"),
+    Input("co-strategy", "value"),
     Input("config-store", "data"),
     Input("use-case", "value"),
 )
-def render_fan_chart(store, milestones, monthly, config_data, use_case):
-    """MCMC bootstrap of the accumulation climb to retirement (mirrors Forecast's
-    fan), resampling the user's holdings' real annual returns."""
+def render_fan_chart(store, milestones, monthly, strategy, config_data, use_case):
+    """MCMC bootstrap of the accumulation climb to retirement, resampling the user's
+    holdings' real annual returns. When a glide strategy + the equity/fixed pools are
+    available, the simulation de-risks along the glide (Phase 5b) so the cloud narrows
+    toward retirement and moves with the strategy; otherwise it falls back to the
+    flat weighted-average pool."""
     if not store or not store.get("ok") or not store.get("real_return_pool"):
         return _detail_empty((store or {}).get("message", "No data") if store else "Loading…"), ""
 
@@ -1447,18 +1453,43 @@ def render_fan_chart(store, milestones, monthly, config_data, use_case):
     contribs = [annual_contribution if (current_age + t) < coast_age else 0.0
                 for t in range(horizon_years)]
 
-    sims = bootstrap_projection(store["real_return_pool"], start_value, contribs, horizon_years)
+    glide = store.get("glide")
+    eq_pool, fx_pool = store.get("equity_pool"), store.get("fixed_pool")
+    n_years = store.get("n_years", 0)
+    use_glide = (glide and eq_pool and fx_pool
+                 and strategy in STRATEGY_TERMINAL_EQUITY)
+
+    if use_glide:
+        # Per-simulated-year equity weight: the same downward glide the deterministic
+        # projection uses, so the cloud de-risks (and narrows) toward retirement.
+        wpath = equity_weight_path(glide["w_equity0"], STRATEGY_TERMINAL_EQUITY[strategy],
+                                   current_age, retirement_age)
+        w_term = STRATEGY_TERMINAL_EQUITY[strategy]
+        weights = [wpath.get(current_age + t, w_term) for t in range(horizon_years)]
+        sims = bootstrap_glide_projection(eq_pool, fx_pool, weights, start_value,
+                                          contribs, horizon_years)
+        n_pool = min(len(eq_pool), len(fx_pool))
+        caption = (
+            f"1,000 simulations resampling {n_pool} years of equity & bond real returns, "
+            f"de-risking along your {STRATEGY_LABELS[strategy].lower()} glide "
+            f"({glide['w_equity0'] * 100:.0f}% → {w_term * 100:.0f}% equity). A more "
+            f"conservative glide tightens the spread of outcomes (and lowers the median); "
+            f"line is the median at age {retirement_age}. Bands are the 10th–90th and "
+            f"25th–75th percentiles."
+        )
+    else:
+        sims = bootstrap_projection(store["real_return_pool"], start_value,
+                                    contribs, horizon_years)
+        caption = (
+            f"1,000 bootstrap simulations resampling {n_years} years of your portfolio's "
+            f"real returns. Bands show the 10th–90th and 25th–75th (IQR) percentiles; the "
+            f"line is the median outcome at age {retirement_age}. Reflects today's asset "
+            f"mix (pick a strategy with holdings to de-risk along the glide)."
+        )
+
     bands = percentile_bands(sims)
     ages = list(range(current_age + 1, current_age + 1 + horizon_years))
-
     fig = _fan_figure(bands, ages, start_value, current_age)
-    n_years = store.get("n_years", 0)
-    caption = (
-        f"1,000 bootstrap simulations resampling {n_years} years of your portfolio's "
-        f"real returns. Bands show the 10th–90th and 25th–75th (IQR) percentiles; the "
-        f"line is the median outcome at age {retirement_age}. Reflects today's asset "
-        f"mix — strategy-aware bands that de-risk along the glide are coming."
-    )
     return fig, caption
 
 

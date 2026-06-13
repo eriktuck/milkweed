@@ -291,6 +291,74 @@ def bootstrap_projection(
     return values.T  # (horizon_years, n_sims)
 
 
+def bootstrap_glide_projection(
+    equity_pool,
+    fixed_pool,
+    equity_weights,
+    start_value: float,
+    annual_contributions,
+    horizon_years: int,
+    n_sims: int = N_SIMS,
+    seed: int = RNG_SEED,
+) -> np.ndarray:
+    """Glide-aware Monte Carlo bootstrap (.planning SPEC delta, Phase 5b).
+
+    Like :func:`bootstrap_projection`, but each simulated year blends a resampled
+    **equity** and **fixed** real return by that year's glide equity weight, so the
+    simulated portfolio de-risks toward retirement exactly as the deterministic glide
+    does. Later years then add less return volatility, so a more conservative glide
+    yields a tighter *terminal* spread (the dollar fan still widens with horizon —
+    more compounding — just more slowly near retirement). ``equity_pool`` /
+    ``fixed_pool`` are aligned historical real-return arrays
+    (same year per index); a single index is drawn per (sim, year) and used for
+    **both** legs, preserving any equity/bond co-movement within a year (e.g. 2022,
+    when both fell). ``equity_weights[t]`` is the equity fraction held during
+    simulated year ``t``::
+
+        r[:, t] = w[t]·equity_sampled[:, t] + (1 − w[t])·fixed_sampled[:, t]
+        V[:, t] = V[:, t-1] · (1 + r[:, t]) + contributions[t]
+
+    Returns an ``(horizon_years, n_sims)`` matrix of real-dollar values, or a zero
+    matrix when a pool is empty / the horizon is non-positive.
+    """
+    eq = np.asarray(equity_pool, dtype="float64")
+    fx = np.asarray(fixed_pool, dtype="float64")
+    horizon_years = int(horizon_years)
+    n = min(eq.size, fx.size)
+    if n == 0 or horizon_years <= 0:
+        return np.zeros((max(horizon_years, 0), n_sims))
+    eq, fx = eq[:n], fx[:n]
+    paired = ~(np.isnan(eq) | np.isnan(fx))
+    eq, fx = eq[paired], fx[paired]
+    if eq.size == 0:
+        return np.zeros((horizon_years, n_sims))
+
+    w = np.asarray(equity_weights, dtype="float64")
+    if w.size == 0:
+        w = np.ones(horizon_years)
+    elif w.size < horizon_years:
+        w = np.pad(w, (0, horizon_years - w.size), constant_values=w[-1])
+    else:
+        w = w[:horizon_years]
+
+    contrib = np.asarray(annual_contributions, dtype="float64")
+    if contrib.size < horizon_years:
+        contrib = np.pad(contrib, (0, horizon_years - contrib.size))
+    else:
+        contrib = contrib[:horizon_years]
+
+    rng = np.random.default_rng(seed)
+    idx = rng.integers(0, eq.size, size=(n_sims, horizon_years))
+    blended = w[None, :] * eq[idx] + (1.0 - w[None, :]) * fx[idx]
+
+    values = np.empty((n_sims, horizon_years), dtype="float64")
+    prev = np.full(n_sims, float(start_value))
+    for t in range(horizon_years):
+        prev = prev * (1 + blended[:, t]) + contrib[t]
+        values[:, t] = prev
+    return values.T  # (horizon_years, n_sims)
+
+
 def percentile_bands(sims: np.ndarray, percentiles=_PERCENTILES) -> dict[int, list[float]]:
     """Per-year percentile bands across simulations: ``{pct: [value_per_year]}``."""
     if sims.size == 0:
@@ -368,6 +436,46 @@ def glide_return_params(
     }
 
 
+def glide_return_pools(
+    holdings: list[dict], inflation: pd.Series | None = None
+) -> dict:
+    """Aligned (equity, fixed) historical real-return arrays for the glide-aware fan.
+
+    The two pools the glide-aware bootstrap resamples (see
+    :func:`bootstrap_glide_projection`): the value-weighted **equity-leg** real
+    returns and the **bond-proxy** real returns, intersected on their common years so
+    index ``i`` is the same calendar year in both — preserving any within-year
+    equity/bond co-movement when a single year is drawn. Falls back to the
+    ``FALLBACK_TICKER`` proxy for equity and a flat ``CASH_REAL_RETURN`` series for
+    fixed when a leg has no usable history. Returns ``{"equity_pool", "fixed_pool",
+    "years"}`` (empty lists when nothing aligns).
+    """
+    if inflation is None:
+        inflation = inflation_series()
+
+    class_series = asset_class_real_returns(holdings, inflation)
+    weights = portfolio_weights(holdings)
+    equity = weighted_average_real_returns(
+        {cls: s for cls, s in class_series.items() if cls in EQUITY_CLASSES},
+        {cls: weights.get(cls, 0.0) for cls in EQUITY_CLASSES},
+    )
+    if not len(equity):
+        equity = real_annual_returns(FALLBACK_TICKER, inflation)
+    fixed = real_annual_returns(BOND_PROXY, inflation)
+    if not len(fixed):
+        fixed = pd.Series(CASH_REAL_RETURN, index=equity.index, dtype="float64")
+
+    common = equity.index.intersection(fixed.index)
+    if len(common) == 0:
+        return {"equity_pool": [], "fixed_pool": [], "years": []}
+    common = common.sort_values()
+    return {
+        "equity_pool": [float(x) for x in equity.loc[common]],
+        "fixed_pool": [float(x) for x in fixed.loc[common]],
+        "years": [int(y) for y in common],
+    }
+
+
 # ── Orchestration ────────────────────────────────────────────────────────────
 
 def build_returns_payload(holdings: list[dict]) -> dict:
@@ -391,6 +499,9 @@ def build_returns_payload(holdings: list[dict]) -> dict:
             "suggested_real_return_pct": 0.0,
             "n_years": 0,
             "glide": None,
+            "equity_pool": [],
+            "fixed_pool": [],
+            "years": [],
         }
 
     inflation = inflation_series()
@@ -412,6 +523,9 @@ def build_returns_payload(holdings: list[dict]) -> dict:
             "suggested_real_return_pct": 0.0,
             "n_years": 0,
             "glide": None,
+            "equity_pool": [],
+            "fixed_pool": [],
+            "years": [],
         }
 
     return {
@@ -427,4 +541,5 @@ def build_returns_payload(holdings: list[dict]) -> dict:
         "suggested_real_return_pct": round(suggested_real_return(weighted_avg) * 100.0, 2),
         "n_years": int(len(weighted_avg)),
         "glide": glide_return_params(holdings, inflation),
+        **glide_return_pools(holdings, inflation),  # equity_pool, fixed_pool, years
     }
