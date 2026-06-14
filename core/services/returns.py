@@ -223,6 +223,46 @@ def asset_class_real_returns(
     return result
 
 
+def _effective_ticker(symbol: str, asset_class: str, inflation: pd.Series) -> str:
+    """The ticker whose history actually feeds this holding's real-return series.
+
+    Mirrors :func:`_ticker_real_returns`'s resolution so a label names exactly what
+    the math used: the held ``symbol`` when it has ``>= MIN_YEARS_HISTORY`` of data,
+    otherwise the class proxy that stood in for it. Cash/money-market resolves to its
+    proxy label (it's modelled at a flat real return, never fetched).
+    """
+    if symbol in MONEY_MARKET_SYMBOLS or asset_class == "Cash":
+        return ASSET_CLASS_PROXY.get("Cash", FALLBACK_TICKER)
+    if len(real_annual_returns(symbol, inflation)) >= MIN_YEARS_HISTORY:
+        return symbol
+    return ASSET_CLASS_PROXY.get(asset_class, FALLBACK_TICKER)
+
+
+def class_effective_tickers(
+    holdings: list[dict], inflation: pd.Series | None = None
+) -> dict[str, list[str]]:
+    """Per asset class present, the effective tickers whose histories feed its series.
+
+    Each held symbol contributes its own ticker when it has enough history, else the
+    proxy that replaced it (see :func:`_effective_ticker`). Dedupes within a class,
+    preserving holding order — so the chart can label each per-class line with the
+    real funds behind it and only name a proxy when a proxy was actually used.
+    """
+    if inflation is None:
+        inflation = inflation_series()
+    out: dict[str, list[str]] = {}
+    for h in holdings:
+        if float(h.get("total_value", 0.0) or 0.0) <= 0:
+            continue
+        symbol = h.get("symbol", "")
+        cls = _classify(symbol)
+        eff = _effective_ticker(symbol, cls, inflation)
+        bucket = out.setdefault(cls, [])
+        if eff and eff not in bucket:
+            bucket.append(eff)
+    return out
+
+
 def weighted_average_real_returns(
     class_series: dict[str, pd.Series], weights: dict[str, float]
 ) -> pd.Series:
@@ -494,8 +534,9 @@ def glide_return_params(
       * ``w_equity0`` — fraction of the portfolio in equity classes (US/Intl/Other).
       * ``r_equity``  — median of the value-weighted real returns of the held equity
         classes; falls back to the ``FALLBACK_TICKER`` (VTSAX) proxy if none resolve.
-      * ``r_fixed``   — median real return of the ``BOND_PROXY``, available even when
-        the user holds no bonds today; falls back to ``CASH_REAL_RETURN`` if the
+      * ``r_fixed``   — median real return of the user's **actual** bond holdings;
+        falls back to the ``BOND_PROXY`` when they hold no bonds today (the glide
+        de-risks into bonds regardless), then to ``CASH_REAL_RETURN`` if even the
         proxy has no usable history.
 
     Returns ``None`` for empty/zero-value holdings (no portfolio → no glide start).
@@ -521,7 +562,11 @@ def glide_return_params(
     else:
         r_equity = suggested_real_return(real_annual_returns(FALLBACK_TICKER, inflation))
 
-    bond_series = real_annual_returns(BOND_PROXY, inflation)
+    # Fixed leg: the user's actual bonds when held, the BOND_PROXY otherwise (the
+    # glide de-risks into bonds even for someone holding none today).
+    bond_series = class_series.get("Bonds")
+    if bond_series is None or not len(bond_series):
+        bond_series = real_annual_returns(BOND_PROXY, inflation)
     r_fixed = suggested_real_return(bond_series) if len(bond_series) else CASH_REAL_RETURN
 
     return {
@@ -538,7 +583,8 @@ def glide_return_pools(
 
     The two pools the glide-aware bootstrap resamples (see
     :func:`bootstrap_glide_projection`): the value-weighted **equity-leg** real
-    returns and the **bond-proxy** real returns, intersected on their common years so
+    returns and the **fixed-leg** real returns — the user's actual bonds when held,
+    the ``BOND_PROXY`` otherwise — intersected on their common years so
     index ``i`` is the same calendar year in both — preserving any within-year
     equity/bond co-movement when a single year is drawn. Falls back to the
     ``FALLBACK_TICKER`` proxy for equity and a flat ``CASH_REAL_RETURN`` series for
@@ -556,7 +602,10 @@ def glide_return_pools(
     )
     if not len(equity):
         equity = real_annual_returns(FALLBACK_TICKER, inflation)
-    fixed = real_annual_returns(BOND_PROXY, inflation)
+    # Fixed leg: actual bonds when held, BOND_PROXY otherwise, flat cash as last resort.
+    fixed = class_series.get("Bonds")
+    if fixed is None or not len(fixed):
+        fixed = real_annual_returns(BOND_PROXY, inflation)
     if not len(fixed):
         fixed = pd.Series(CASH_REAL_RETURN, index=equity.index, dtype="float64")
 
@@ -631,6 +680,7 @@ def build_returns_payload(holdings: list[dict]) -> dict:
         "class_real_returns": {
             cls: {int(y): float(r) for y, r in s.items()} for cls, s in class_series.items()
         },
+        "class_labels": class_effective_tickers(holdings, inflation),
         "weighted_avg": {int(y): float(r) for y, r in weighted_avg.items()},
         "real_return_pool": [float(x) for x in weighted_avg.to_numpy()],
         "suggested_real_return_pct": round(suggested_real_return(weighted_avg) * 100.0, 2),

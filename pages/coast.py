@@ -52,9 +52,7 @@ from core.services.retirement import (
     taxable_gain_fraction,
 )
 from core.services.returns import (
-    ASSET_CLASS_PROXY,
     BOND_PROXY,
-    EQUITY_CLASSES,
     build_returns_payload,
     glide_cagr_projection,
 )
@@ -76,6 +74,17 @@ _C_TOTAL = "#444444"       # total value line
 _C_WORKING = "#3b82f6"
 _C_TRAD = "#8b5cf6"        # violet — tax-deferred
 _C_ROTH = "#14b8a6"        # teal — Roth
+
+# Faint per-asset-class lines on the rate-of-return chart (equities, then bonds);
+# colours are muted so the bold CAGR line leads. Cash is omitted — the scenario forces
+# it to a flat 0% real, so it would just trace the zero reference line.
+_CLASS_ORDER = ["US Equity", "Intl Equity", "Other", "Bonds"]
+_CLASS_LINE_COLORS = {
+    "US Equity": "#9bb4e0",    # muted blue
+    "Intl Equity": "#86c5b9",  # muted teal
+    "Other": "#c3aed6",        # muted violet
+    "Bonds": "#d6b38a",        # muted tan
+}
 
 # Fallback ages (used only before a Profile exists; Profile is the truth).
 _DEFAULT_CURRENT_AGE = 40
@@ -1429,20 +1438,27 @@ def render_returns_chart(store, milestones, strategy, config_data, use_case):
     weighted_avg = {int(k): float(v) for k, v in (store.get("weighted_avg") or {}).items()}
     glide = store.get("glide")
     eq_pool, fx_pool = store.get("equity_pool"), store.get("fixed_pool")
-    pool_years = [int(y) for y in (store.get("years") or [])]
 
-    # Faint per-leg historical lines (equity proxy + bond proxy), aligned on `years`.
-    held_classes = set((store.get("class_real_returns") or {}).keys())
-    eq_proxies = list(dict.fromkeys(
-        ASSET_CLASS_PROXY[c] for c in EQUITY_CLASSES if c in held_classes))
-    eq_label = f"Equity · {'/'.join(eq_proxies)}" if eq_proxies else "Equity · VTSAX"
+    # Faint background: each asset class's *actual* annual real return — the real
+    # inputs to the trailing CAGR. Kept as faint, unlabelled background texture (no
+    # legend entry) — only the short class name shows on hover.
+    class_real = {c: s for c, s in (store.get("class_real_returns") or {}).items()
+                  if c != "Cash"}
+    class_labels = store.get("class_labels") or {}
+    ordered = ([c for c in _CLASS_ORDER if c in class_real]
+               + [c for c in class_real if c not in _CLASS_ORDER])
     class_lines = []
-    if pool_years and eq_pool:
-        class_lines.append({"name": eq_label, "years": pool_years, "rets": eq_pool,
-                            "color": "#9bb4e0"})
-    if pool_years and fx_pool:
-        class_lines.append({"name": f"Bonds · {BOND_PROXY}", "years": pool_years,
-                            "rets": fx_pool, "color": "#d6b38a"})
+    for cls in ordered:
+        pts = {int(y): float(r) for y, r in class_real[cls].items()}
+        if not pts:
+            continue
+        yrs = sorted(pts)
+        class_lines.append({
+            "name": cls,
+            "years": yrs,
+            "rets": [pts[y] for y in yrs],
+            "color": _CLASS_LINE_COLORS.get(cls, "#bbbbbb"),
+        })
 
     use_glide = bool(glide and eq_pool and fx_pool and horizon_years > 0
                      and strategy in STRATEGY_TERMINAL_EQUITY)
@@ -1454,13 +1470,15 @@ def render_returns_chart(store, milestones, strategy, config_data, use_case):
         weights = [wpath.get(current_age + t, w_term) for t in range(horizon_years)]
         cagr_proj = glide_cagr_projection(eq_pool, fx_pool, weights,
                                           glide["r_equity"], glide["r_fixed"])
-        n_pool = min(len(eq_pool), len(fx_pool))
         path = (f"holds {w0 * 100:.0f}% equity" if w0 <= w_term
                 else f"{w0 * 100:.0f}% → {w_term * 100:.0f}% equity")
+        # Fixed leg uses your actual bonds when held, the proxy otherwise.
+        fixed_label = "/".join(class_labels.get("Bonds") or [BOND_PROXY])
         caption = (
-            f"Faint lines are {n_pool} years of equity ({eq_label.split(' · ')[-1]}) and "
-            f"bond ({BOND_PROXY}) annual real returns. The bold line is your portfolio's "
-            f"CAGR (geometric mean) — past, then projected forward along your "
+            f"Faint lines are each asset class's actual annual real return from your "
+            f"holdings — the real inputs to the bold CAGR (geometric mean). Past the "
+            f"\"today\" line the model collapses to a two-leg equity-vs-bond mix "
+            f"(bonds = {fixed_label}) and projects the CAGR forward along your "
             f"{STRATEGY_LABELS[strategy].lower()} glide ({path}). The band is the 25th–75th "
             f"standard-error interval, tightening as the average spans more years and the "
             f"mix de-risks toward bonds."
@@ -1554,12 +1572,13 @@ def _returns_figure(weighted_avg, class_lines, weights, cagr_proj,
     None when there's no glide to project — then only the historical halves render."""
     fig = go.Figure()
 
-    # ── Faint background: each leg's actual annual real return (historical only) ───
+    # ── Faint background: each class's actual annual real return (historical only) ─
+    # Unlabelled texture — kept out of the legend; the class name shows only on hover.
     for cl in class_lines:
         fig.add_trace(go.Scatter(
             x=cl["years"], y=cl["rets"], mode="lines", name=cl["name"],
-            line=dict(width=1, color=cl["color"]), opacity=0.7,
-            hovertemplate=f"%{{x}}<br>{cl['name']} %{{y:.1%}}<extra></extra>",
+            line=dict(width=1, color=cl["color"]), opacity=0.7, showlegend=False,
+            hovertemplate=f"{cl['name']} %{{y:.1%}}<extra></extra>",
         ))
 
     horizon = len(weights) if weights else 0
@@ -1583,7 +1602,7 @@ def _returns_figure(weighted_avg, class_lines, weights, cagr_proj,
         fig.add_trace(go.Scatter(
             x=cagr_years, y=cagr_vals, mode="lines", name="Average return (CAGR)",
             line=dict(width=3, color=_C_TOTAL),
-            hovertemplate="%{x}<br>trailing CAGR %{y:.1%}<extra></extra>",
+            hovertemplate="trailing CAGR %{y:.1%}<extra></extra>",
         ))
     if cagr_proj and cagr_proj.get("expected") and horizon:
         anchor = cagr_vals[-1] if cagr_vals else cagr_proj["expected"][0]
@@ -1591,18 +1610,17 @@ def _returns_figure(weighted_avg, class_lines, weights, cagr_proj,
             x=[current_year] + fut_years, y=[anchor] + cagr_proj["expected"],
             mode="lines", name="Projected CAGR",
             line=dict(width=3, color=_C_WORKING),
-            hovertemplate="%{x}<br>projected CAGR %{y:.1%}<extra></extra>",
+            hovertemplate="projected CAGR %{y:.1%}<extra></extra>",
         ))
         # End-of-line readout: the small CAGR scale makes strategy differences subtle,
         # so pin the projected value to the terminal point (mirrors the card header).
+        # An annotation, not a data point, so it never reads as an extra trace/marker.
         end_cagr = cagr_proj["expected"][-1]
-        fig.add_trace(go.Scatter(
-            x=[fut_years[-1]], y=[end_cagr], mode="markers+text",
-            marker=dict(size=6, color=_C_WORKING),
-            text=[f" {end_cagr:.1%}"], textposition="middle right",
-            textfont=dict(size=12, color=_C_WORKING),
-            showlegend=False, cliponaxis=False, hoverinfo="skip",
-        ))
+        fig.add_annotation(
+            x=fut_years[-1], y=end_cagr, text=f"{end_cagr:.1%}",
+            showarrow=False, xanchor="left", yanchor="middle", xshift=6,
+            font=dict(size=12, color=_C_WORKING),
+        )
 
     # Zero reference + the "today" divider.
     fig.add_hline(y=0, line_color="#e3e3e3", line_width=1)
