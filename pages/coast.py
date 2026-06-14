@@ -21,7 +21,6 @@ from datetime import date
 import dash
 import dash_bootstrap_components as dbc
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 from dash import Input, Output, State, callback, dash_table, dcc, html
 from flask import session
 
@@ -53,8 +52,10 @@ from core.services.retirement import (
     taxable_gain_fraction,
 )
 from core.services.returns import (
+    ASSET_CLASS_PROXY,
+    BOND_PROXY,
+    EQUITY_CLASSES,
     build_returns_payload,
-    glide_annual_return_bands,
     glide_cagr_projection,
 )
 from core.services.glide import (
@@ -458,10 +459,12 @@ _rate_module = _module(
                 inline=True,
             ), className="d-flex align-items-center"),
         ], className="g-2 mb-2"),
-        html.P("How your portfolio's historical (real, inflation-adjusted) returns "
-               "project forward under the chosen glide. Top: the average return (CAGR) "
-               "you've earned and the cone of what you'll realise. Bottom: each year's "
-               "return spread, narrowing as the glide de-risks toward bonds.",
+        html.P("The faint lines are each leg's actual annual real return — equity and "
+               "bonds swing wildly year to year. The bold line is your portfolio's "
+               "average return (CAGR): smooth in the past, projected forward under the "
+               "chosen glide. Any single year is a coin toss, but over the long run the "
+               "average converges — and the shaded band shows how a more conservative "
+               "glide tightens that long-run outcome.",
                className="text-muted small mb-2"),
         dcc.Loading(dcc.Graph(id="co-fan-chart",
                               config={"displayModeBar": False}), type="circle"),
@@ -1398,17 +1401,19 @@ def compute_returns_data(config_data, use_case):
     Input("use-case", "value"),
 )
 def render_returns_chart(store, milestones, strategy, config_data, use_case):
-    """Rate-of-return story in two stacked panels on one calendar-year timeline:
+    """Rate-of-return story on one calendar-year timeline:
 
-      • Top — the *consequence*: the average real return (CAGR). Past = trailing CAGR
-        of today's portfolio; future = the cone of cumulative CAGR you'll realise under
-        the chosen glide (narrows with horizon + de-risking).
-      • Bottom — the *mechanism*: each year's annual return spread, which shrinks purely
-        as the glide de-risks toward bonds (independent of horizon).
+      • Faint lines — each leg's *actual* annual real return (equity proxy + bond
+        proxy), historical only. They swing wildly: any single year is a coin toss.
+      • Bold line — the *consequence*: the portfolio's average real return (CAGR).
+        Past = trailing CAGR of today's mix; future = the cumulative CAGR you'll realise
+        gliding down to the chosen terminal allocation.
+      • Shaded band — the long-run uncertainty around the *future* CAGR (25–75 standard-
+        error), which tightens with horizon and with a more conservative glide.
 
-    Both halves are the same blend, Σ wᵢ·rᵢ — today's weights on realised history in the
-    past, the glide's weights on resampled history in the future. Portfolio value and
-    contributions are irrelevant to the *rate*, so they don't appear here."""
+    The forward annual spread is deliberately omitted — single-year resampled returns
+    are too optimistic to anchor a plan on; only the converging average is shown forward.
+    Portfolio value and contributions don't affect the *rate*, so they don't appear."""
     if not store or not store.get("ok"):
         return _detail_empty((store or {}).get("message", "No data") if store else "Loading…"), ""
 
@@ -1424,35 +1429,48 @@ def render_returns_chart(store, milestones, strategy, config_data, use_case):
     weighted_avg = {int(k): float(v) for k, v in (store.get("weighted_avg") or {}).items()}
     glide = store.get("glide")
     eq_pool, fx_pool = store.get("equity_pool"), store.get("fixed_pool")
+    pool_years = [int(y) for y in (store.get("years") or [])]
+
+    # Faint per-leg historical lines (equity proxy + bond proxy), aligned on `years`.
+    held_classes = set((store.get("class_real_returns") or {}).keys())
+    eq_proxies = list(dict.fromkeys(
+        ASSET_CLASS_PROXY[c] for c in EQUITY_CLASSES if c in held_classes))
+    eq_label = f"Equity · {'/'.join(eq_proxies)}" if eq_proxies else "Equity · VTSAX"
+    class_lines = []
+    if pool_years and eq_pool:
+        class_lines.append({"name": eq_label, "years": pool_years, "rets": eq_pool,
+                            "color": "#9bb4e0"})
+    if pool_years and fx_pool:
+        class_lines.append({"name": f"Bonds · {BOND_PROXY}", "years": pool_years,
+                            "rets": fx_pool, "color": "#d6b38a"})
+
     use_glide = bool(glide and eq_pool and fx_pool and horizon_years > 0
                      and strategy in STRATEGY_TERMINAL_EQUITY)
 
-    weights = cagr_proj = ann_bands = None
+    weights = cagr_proj = None
     if use_glide:
         w0, w_term = glide["w_equity0"], STRATEGY_TERMINAL_EQUITY[strategy]
         wpath = equity_weight_path(w0, w_term, current_age, retirement_age)
         weights = [wpath.get(current_age + t, w_term) for t in range(horizon_years)]
         cagr_proj = glide_cagr_projection(eq_pool, fx_pool, weights,
                                           glide["r_equity"], glide["r_fixed"])
-        ann_bands = glide_annual_return_bands(eq_pool, fx_pool, weights)
         n_pool = min(len(eq_pool), len(fx_pool))
         path = (f"holds {w0 * 100:.0f}% equity" if w0 <= w_term
                 else f"{w0 * 100:.0f}% → {w_term * 100:.0f}% equity")
         caption = (
-            f"Built from {n_pool} years of equity & bond real returns along your "
-            f"{STRATEGY_LABELS[strategy].lower()} glide ({path}). Top line is the expected "
-            f"CAGR (geometric mean) gliding down with the mix; the band is the 25th–75th "
+            f"Faint lines are {n_pool} years of equity ({eq_label.split(' · ')[-1]}) and "
+            f"bond ({BOND_PROXY}) annual real returns. The bold line is your portfolio's "
+            f"CAGR (geometric mean) — past, then projected forward along your "
+            f"{STRATEGY_LABELS[strategy].lower()} glide ({path}). The band is the 25th–75th "
             f"standard-error interval, tightening as the average spans more years and the "
-            f"mix de-risks. "
-            f"Bottom spread is the 10th–90th / 25th–75th of each year's return at that "
-            f"year's allocation, narrowing purely from de-risking."
+            f"mix de-risks toward bonds."
         )
     else:
         caption = ("Add holdings on the Investments page (and pick a strategy) to "
-                   "project these historical returns forward along a glide.")
+                   "project this CAGR forward along a glide.")
 
-    fig = _returns_panels_figure(
-        weighted_avg, weights, cagr_proj, ann_bands,
+    fig = _returns_figure(
+        weighted_avg, class_lines, weights, cagr_proj,
         current_age, retirement_age, date.today().year,
     )
     return fig, caption
@@ -1522,100 +1540,82 @@ def _trailing_cagr(weighted_avg: dict[int, float], window: int | None = None,
     return out_years, out_cagr
 
 
-# Fan band fills, shared by both panels.
-_FILL_OUTER = "rgba(91,126,201,0.13)"   # 10–90 band
-_FILL_INNER = "rgba(91,126,201,0.28)"   # 25–75 (IQR) band
+# SE band fill around the future CAGR.
+_FILL_INNER = "rgba(91,126,201,0.28)"   # 25–75 standard-error band
 
 
-def _returns_panels_figure(weighted_avg, weights, cagr_proj, ann_bands,
-                           current_age, retirement_age, current_year) -> go.Figure:
-    """Two stacked panels sharing a calendar-year x-axis (see render_returns_chart).
-    `weights`/`cagr_proj`/`ann_bands` are None when there's no glide to project — then
-    only the historical halves render."""
-    fig = make_subplots(
-        rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08,
-        row_heights=[0.6, 0.4],
-        subplot_titles=("Average real return (CAGR)", "Annual real return"),
-    )
+def _returns_figure(weighted_avg, class_lines, weights, cagr_proj,
+                    current_age, retirement_age, current_year) -> go.Figure:
+    """Single panel on a calendar-year x-axis (see render_returns_chart).
 
-    # ── Top, past: trailing CAGR of today's portfolio ────────────────────────────
-    cagr_years, cagr_vals = _trailing_cagr(weighted_avg)
-    if cagr_years:
+    Faint per-leg annual returns (`class_lines`) give the wild year-to-year texture;
+    the bold CAGR line (trailing past + projected future) is the emphasised signal; the
+    shaded band is the future-CAGR standard-error interval. `weights`/`cagr_proj` are
+    None when there's no glide to project — then only the historical halves render."""
+    fig = go.Figure()
+
+    # ── Faint background: each leg's actual annual real return (historical only) ───
+    for cl in class_lines:
         fig.add_trace(go.Scatter(
-            x=cagr_years, y=cagr_vals, mode="lines", name="Trailing CAGR",
-            line=dict(width=2.5, color=_C_TOTAL),
-            hovertemplate="%{x}<br>trailing CAGR %{y:.1%}<extra></extra>",
-        ), row=1, col=1)
+            x=cl["years"], y=cl["rets"], mode="lines", name=cl["name"],
+            line=dict(width=1, color=cl["color"]), opacity=0.7,
+            hovertemplate=f"%{{x}}<br>{cl['name']} %{{y:.1%}}<extra></extra>",
+        ))
 
     horizon = len(weights) if weights else 0
     fut_years = [current_year + 1 + t for t in range(horizon)]
 
-    # ── Top, future: expected CAGR (geometric mean) + SE band, anchored at today ──
+    # ── Future CAGR standard-error band (drawn before the lines so it sits behind) ─
+    cagr_years, cagr_vals = _trailing_cagr(weighted_avg)
     if cagr_proj and cagr_proj.get("expected") and horizon:
         anchor = cagr_vals[-1] if cagr_vals else cagr_proj["expected"][0]
         xc = [current_year] + fut_years
+        fig.add_trace(go.Scatter(x=xc, y=[anchor] + cagr_proj[75], mode="lines",
+                                 line=dict(width=0), showlegend=False,
+                                 hoverinfo="skip"))
+        fig.add_trace(go.Scatter(x=xc, y=[anchor] + cagr_proj[25], mode="lines",
+                                 line=dict(width=0), fill="tonexty",
+                                 fillcolor=_FILL_INNER, name="CAGR 25–75 (long-run)",
+                                 hoverinfo="skip"))
 
-        def _cone(key):
-            return [anchor] + cagr_proj[key]
-
-        fig.add_trace(go.Scatter(x=xc, y=_cone(75), mode="lines", line=dict(width=0),
-                                 showlegend=False, hoverinfo="skip"), row=1, col=1)
-        fig.add_trace(go.Scatter(x=xc, y=_cone(25), mode="lines", line=dict(width=0),
-                                 fill="tonexty", fillcolor=_FILL_INNER,
-                                 name="CAGR 25–75 SE", hoverinfo="skip"), row=1, col=1)
+    # ── Emphasised: trailing CAGR (past) → projected CAGR (future), one bold story ─
+    if cagr_years:
         fig.add_trace(go.Scatter(
-            x=xc, y=_cone("expected"), mode="lines", name="Projected CAGR",
-            line=dict(width=2.5, color=_C_WORKING),
+            x=cagr_years, y=cagr_vals, mode="lines", name="Average return (CAGR)",
+            line=dict(width=3, color=_C_TOTAL),
+            hovertemplate="%{x}<br>trailing CAGR %{y:.1%}<extra></extra>",
+        ))
+    if cagr_proj and cagr_proj.get("expected") and horizon:
+        anchor = cagr_vals[-1] if cagr_vals else cagr_proj["expected"][0]
+        fig.add_trace(go.Scatter(
+            x=[current_year] + fut_years, y=[anchor] + cagr_proj["expected"],
+            mode="lines", name="Projected CAGR",
+            line=dict(width=3, color=_C_WORKING),
             hovertemplate="%{x}<br>projected CAGR %{y:.1%}<extra></extra>",
-        ), row=1, col=1)
-
-    # ── Bottom, past: realised annual portfolio returns (today's mix) ─────────────
-    if weighted_avg:
-        ay = sorted(weighted_avg)
+        ))
+        # End-of-line readout: the small CAGR scale makes strategy differences subtle,
+        # so pin the projected value to the terminal point (mirrors the card header).
+        end_cagr = cagr_proj["expected"][-1]
         fig.add_trace(go.Scatter(
-            x=ay, y=[weighted_avg[y] for y in ay], mode="lines", name="Realised annual",
-            line=dict(width=1, color="#bbb"),
-            hovertemplate="%{x}<br>annual %{y:.1%}<extra></extra>",
-        ), row=2, col=1)
+            x=[fut_years[-1]], y=[end_cagr], mode="markers+text",
+            marker=dict(size=6, color=_C_WORKING),
+            text=[f" {end_cagr:.1%}"], textposition="middle right",
+            textfont=dict(size=12, color=_C_WORKING),
+            showlegend=False, cliponaxis=False, hoverinfo="skip",
+        ))
 
-    # ── Bottom, future: annual-return spread under the gliding allocation ──────────
-    if ann_bands and horizon:
-        fig.add_trace(go.Scatter(x=fut_years, y=ann_bands[90], mode="lines",
-                                 line=dict(width=0), showlegend=False,
-                                 hoverinfo="skip"), row=2, col=1)
-        fig.add_trace(go.Scatter(x=fut_years, y=ann_bands[10], mode="lines",
-                                 line=dict(width=0), fill="tonexty",
-                                 fillcolor=_FILL_OUTER, name="Annual 10–90 pct",
-                                 hoverinfo="skip"), row=2, col=1)
-        fig.add_trace(go.Scatter(x=fut_years, y=ann_bands[75], mode="lines",
-                                 line=dict(width=0), showlegend=False,
-                                 hoverinfo="skip"), row=2, col=1)
-        fig.add_trace(go.Scatter(x=fut_years, y=ann_bands[25], mode="lines",
-                                 line=dict(width=0), fill="tonexty",
-                                 fillcolor=_FILL_INNER, name="Annual 25–75 pct",
-                                 hoverinfo="skip"), row=2, col=1)
-        fig.add_trace(go.Scatter(
-            x=fut_years, y=ann_bands[50], mode="lines", name="Expected annual",
-            line=dict(width=2, color=_C_WORKING, dash="dot"),
-            hovertemplate="%{x}<br>expected annual %{y:.1%}<extra></extra>",
-        ), row=2, col=1)
-
-    # Zero reference + the "today" divider on both panels.
-    for r in (1, 2):
-        fig.add_hline(y=0, line_color="#e3e3e3", line_width=1, row=r, col=1)
-        if horizon:
-            fig.add_vline(x=current_year, line_color="#bbb", line_width=1,
-                          line_dash="dot", row=r, col=1)
+    # Zero reference + the "today" divider.
+    fig.add_hline(y=0, line_color="#e3e3e3", line_width=1)
     if horizon:
-        fig.add_annotation(x=current_year, yref="y domain", y=1.0, text="today",
+        fig.add_vline(x=current_year, line_color="#bbb", line_width=1, line_dash="dot")
+        fig.add_annotation(x=current_year, yref="paper", y=1.0, text="today",
                            showarrow=False, font=dict(size=10, color="#999"),
-                           xanchor="left", yanchor="bottom", row=1, col=1)
+                           xanchor="left", yanchor="bottom")
 
     fig.update_layout(
-        **_CHART_LAYOUT, height=460, margin=dict(l=10, r=10, t=40, b=10),
+        **_CHART_LAYOUT, height=420, margin=dict(l=10, r=48, t=30, b=10),
         hovermode="x unified",
     )
     fig.update_yaxes(tickformat=".0%", showgrid=True, gridcolor="#eee", zeroline=False)
-    fig.update_xaxes(showgrid=False)
-    fig.update_xaxes(title="Year", row=2, col=1)
+    fig.update_xaxes(showgrid=False, title="Year")
     return fig
