@@ -21,6 +21,7 @@ from datetime import date
 import dash
 import dash_bootstrap_components as dbc
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from dash import Input, Output, State, callback, dash_table, dcc, html
 from flask import session
 
@@ -52,10 +53,9 @@ from core.services.retirement import (
     taxable_gain_fraction,
 )
 from core.services.returns import (
-    bootstrap_glide_projection,
-    bootstrap_projection,
     build_returns_payload,
-    percentile_bands,
+    glide_annual_return_bands,
+    glide_cagr_projection,
 )
 from core.services.glide import (
     DEFAULT_STRATEGY,
@@ -75,16 +75,6 @@ _C_TOTAL = "#444444"       # total value line
 _C_WORKING = "#3b82f6"
 _C_TRAD = "#8b5cf6"        # violet — tax-deferred
 _C_ROTH = "#14b8a6"        # teal — Roth
-
-# Asset-class line colors for the historical-returns chart (rate-of-return module).
-_CLASS_COLORS = {
-    "US Equity": "#3b82f6",
-    "Intl Equity": "#8b5cf6",
-    "Bonds": "#f59e0b",
-    "Cash": "#9ca3af",
-    "Other": "#14b8a6",
-}
-_C_INFLATION = "#ef4444"   # red — inflation line
 
 # Fallback ages (used only before a Profile exists; Profile is the truth).
 _DEFAULT_CURRENT_AGE = 40
@@ -460,33 +450,22 @@ _rate_module = _module(
             className="text-muted small mb-3",
         ),
         dbc.Row([
-            dbc.Col([
-                dbc.Label("Strategy", className="ban-label mb-1"),
-                dbc.RadioItems(
-                    id="co-strategy", options=_STRATEGY_OPTIONS, value=DEFAULT_STRATEGY,
-                    className="small", inputClassName="me-1", labelClassName="mb-1",
-                ),
-                html.Div([
-                    html.P("Equity glide to retirement", className="text-muted small mb-1 mt-2"),
-                    dcc.Loading(dcc.Graph(id="co-rr-glide-chart",
-                                          config={"displayModeBar": False}), type="circle"),
-                    html.P(id="co-rr-glide-note", className="text-muted small mt-1 mb-0"),
-                ]),
-            ], lg=3),
-            dbc.Col([
-                html.P("Historical real (inflation-adjusted) returns by asset class, with inflation",
-                       className="text-muted small mb-2"),
-                dcc.Loading(dcc.Graph(id="co-class-returns-chart",
-                                      config={"displayModeBar": False}), type="circle"),
-            ], lg=5),
-            dbc.Col([
-                html.P("Likely outcomes — MCMC bootstrap to retirement",
-                       className="text-muted small mb-2"),
-                dcc.Loading(dcc.Graph(id="co-fan-chart",
-                                      config={"displayModeBar": False}), type="circle"),
-                html.P(id="co-fan-caption", className="text-muted small mt-2 mb-0"),
-            ], lg=4),
-        ], className="g-3"),
+            dbc.Col(dbc.Label("Strategy", className="ban-label mb-0"), width="auto",
+                    className="d-flex align-items-center"),
+            dbc.Col(dbc.RadioItems(
+                id="co-strategy", options=_STRATEGY_OPTIONS, value=DEFAULT_STRATEGY,
+                className="small", inputClassName="me-1", labelClassName="me-3 mb-0",
+                inline=True,
+            ), className="d-flex align-items-center"),
+        ], className="g-2 mb-2"),
+        html.P("How your portfolio's historical (real, inflation-adjusted) returns "
+               "project forward under the chosen glide. Top: the average return (CAGR) "
+               "you've earned and the cone of what you'll realise. Bottom: each year's "
+               "return spread, narrowing as the glide de-risks toward bonds.",
+               className="text-muted small mb-2"),
+        dcc.Loading(dcc.Graph(id="co-fan-chart",
+                              config={"displayModeBar": False}), type="circle"),
+        html.P(id="co-fan-caption", className="text-muted small mt-2 mb-0"),
         html.Div([
             dbc.Button("Save strategy", id="co-rr-save", color="primary", size="sm",
                        outline=True),
@@ -1036,8 +1015,6 @@ def save_income(n, al_taxable, al_trad, al_roth, ss_pia, gain_frac, config_data,
     Output("co-ban-required", "children"),
     Output("co-projection-chart", "figure"),
     Output("co-rr-summary", "children"),
-    Output("co-rr-glide-chart", "figure"),
-    Output("co-rr-glide-note", "children"),
     Output("co-glide-chart", "figure"),
     Output("co-glide-note", "children"),
     Output("co-exp-totals", "children"),
@@ -1118,12 +1095,18 @@ def recompute(milestones, monthly, color_mode, strategy, returns_store, exp_rows
         spend_by_phase=spend_override, healthcare_overrides=hc_overrides,
         allocation=alloc_override, pia_annual=pia_override, gain_fraction=gain_override,
     )
-    if s.return_strategy:
+    if s.return_strategy and s.equity_glide:
+        ages = sorted(int(a) for a in s.equity_glide.keys())
+        w0 = float(s.equity_glide[ages[0]]) * 100.0
+        w_term = STRATEGY_TERMINAL_EQUITY[s.return_strategy] * 100.0
+        path = (f"holds {w0:.0f}% equity" if w0 <= w_term + 1e-9
+                else f"{w0:.0f}%→{w_term:.0f}% equity")
+        rr_summary = (f"{STRATEGY_LABELS[s.return_strategy]} glide · {path} · "
+                      f"{s.real_return * 100:.1f}% real")
+    elif s.return_strategy:
         rr_summary = f"{STRATEGY_LABELS[s.return_strategy]} glide · {s.real_return * 100:.1f}% real"
     else:
         rr_summary = f"{s.real_return * 100:.1f}% real"
-    rr_glide_fig = _glide_path_figure(s.equity_glide)
-    rr_glide_note = _glide_path_note(s, glide_params)
 
     # ── BANs: goal → coast target → projected-at-coast → required monthly ─────────
     ban_goal = _ban("Nest-egg goal", _money(s.nest_egg_goal))
@@ -1182,7 +1165,6 @@ def recompute(milestones, monthly, color_mode, strategy, returns_store, exp_rows
     inc_summary = f"SS {_money(ss_monthly)}/mo at {claim_age}"
 
     return (chips, ban_goal, ban_target, ban_status, ban_required, fig, rr_summary,
-            rr_glide_fig, rr_glide_note,
             glide, glide_note, totals, note, exp_summary,
             cashflow, income_summary, inc_summary)
 
@@ -1407,32 +1389,27 @@ def compute_returns_data(config_data, use_case):
 
 
 @callback(
-    Output("co-class-returns-chart", "figure"),
-    Input("co-returns-store", "data"),
-)
-def render_class_returns_chart(store):
-    if not store or not store.get("ok"):
-        return _detail_empty((store or {}).get("message", "No data") if store else "Loading…")
-    return _class_returns_figure(store)
-
-
-@callback(
     Output("co-fan-chart", "figure"),
     Output("co-fan-caption", "children"),
     Input("co-returns-store", "data"),
     Input("co-milestones", "value"),
-    Input("co-monthly", "value"),
     Input("co-strategy", "value"),
     Input("config-store", "data"),
     Input("use-case", "value"),
 )
-def render_fan_chart(store, milestones, monthly, strategy, config_data, use_case):
-    """MCMC bootstrap of the accumulation climb to retirement, resampling the user's
-    holdings' real annual returns. When a glide strategy + the equity/fixed pools are
-    available, the simulation de-risks along the glide (Phase 5b) so the cloud narrows
-    toward retirement and moves with the strategy; otherwise it falls back to the
-    flat weighted-average pool."""
-    if not store or not store.get("ok") or not store.get("real_return_pool"):
+def render_returns_chart(store, milestones, strategy, config_data, use_case):
+    """Rate-of-return story in two stacked panels on one calendar-year timeline:
+
+      • Top — the *consequence*: the average real return (CAGR). Past = trailing CAGR
+        of today's portfolio; future = the cone of cumulative CAGR you'll realise under
+        the chosen glide (narrows with horizon + de-risking).
+      • Bottom — the *mechanism*: each year's annual return spread, which shrinks purely
+        as the glide de-risks toward bonds (independent of horizon).
+
+    Both halves are the same blend, Σ wᵢ·rᵢ — today's weights on realised history in the
+    past, the glide's weights on resampled history in the future. Portfolio value and
+    contributions are irrelevant to the *rate*, so they don't appear here."""
+    if not store or not store.get("ok"):
         return _detail_empty((store or {}).get("message", "No data") if store else "Loading…"), ""
 
     uid = _selected_uid(use_case)
@@ -1440,56 +1417,44 @@ def render_fan_chart(store, milestones, monthly, strategy, config_data, use_case
     if user_cfg is None or not milestones or len(milestones) != 5:
         return _detail_empty(""), ""
 
-    coast_age, retirement_age = int(milestones[0]), int(milestones[1])
     current_age = _current_age(user_cfg)
+    retirement_age = int(milestones[1])
     horizon_years = max(retirement_age - current_age, 0)
-    if horizon_years == 0:
-        return _detail_empty("Retirement age must be after your current age."), ""
 
-    buckets = balances_by_tax_bucket(uid, user_cfg.get("investment_accounts"))
-    start_value = float(buckets.get("total", 0.0))
-    annual_contribution = float(monthly or 0) * 12.0
-    # Contribute during the working phase only (age < coast_age).
-    contribs = [annual_contribution if (current_age + t) < coast_age else 0.0
-                for t in range(horizon_years)]
-
+    weighted_avg = {int(k): float(v) for k, v in (store.get("weighted_avg") or {}).items()}
     glide = store.get("glide")
     eq_pool, fx_pool = store.get("equity_pool"), store.get("fixed_pool")
-    n_years = store.get("n_years", 0)
-    use_glide = (glide and eq_pool and fx_pool
-                 and strategy in STRATEGY_TERMINAL_EQUITY)
+    use_glide = bool(glide and eq_pool and fx_pool and horizon_years > 0
+                     and strategy in STRATEGY_TERMINAL_EQUITY)
 
+    weights = cagr_proj = ann_bands = None
     if use_glide:
-        # Per-simulated-year equity weight: the same downward glide the deterministic
-        # projection uses, so the cloud de-risks (and narrows) toward retirement.
-        wpath = equity_weight_path(glide["w_equity0"], STRATEGY_TERMINAL_EQUITY[strategy],
-                                   current_age, retirement_age)
-        w_term = STRATEGY_TERMINAL_EQUITY[strategy]
+        w0, w_term = glide["w_equity0"], STRATEGY_TERMINAL_EQUITY[strategy]
+        wpath = equity_weight_path(w0, w_term, current_age, retirement_age)
         weights = [wpath.get(current_age + t, w_term) for t in range(horizon_years)]
-        sims = bootstrap_glide_projection(eq_pool, fx_pool, weights, start_value,
-                                          contribs, horizon_years)
+        cagr_proj = glide_cagr_projection(eq_pool, fx_pool, weights,
+                                          glide["r_equity"], glide["r_fixed"])
+        ann_bands = glide_annual_return_bands(eq_pool, fx_pool, weights)
         n_pool = min(len(eq_pool), len(fx_pool))
+        path = (f"holds {w0 * 100:.0f}% equity" if w0 <= w_term
+                else f"{w0 * 100:.0f}% → {w_term * 100:.0f}% equity")
         caption = (
-            f"1,000 simulations resampling {n_pool} years of equity & bond real returns, "
-            f"de-risking along your {STRATEGY_LABELS[strategy].lower()} glide "
-            f"({glide['w_equity0'] * 100:.0f}% → {w_term * 100:.0f}% equity). A more "
-            f"conservative glide tightens the spread of outcomes (and lowers the median); "
-            f"line is the median at age {retirement_age}. Bands are the 10th–90th and "
-            f"25th–75th percentiles."
+            f"Built from {n_pool} years of equity & bond real returns along your "
+            f"{STRATEGY_LABELS[strategy].lower()} glide ({path}). Top line is the expected "
+            f"CAGR (geometric mean) gliding down with the mix; the band is the 25th–75th "
+            f"standard-error interval, tightening as the average spans more years and the "
+            f"mix de-risks. "
+            f"Bottom spread is the 10th–90th / 25th–75th of each year's return at that "
+            f"year's allocation, narrowing purely from de-risking."
         )
     else:
-        sims = bootstrap_projection(store["real_return_pool"], start_value,
-                                    contribs, horizon_years)
-        caption = (
-            f"1,000 bootstrap simulations resampling {n_years} years of your portfolio's "
-            f"real returns. Bands show the 10th–90th and 25th–75th (IQR) percentiles; the "
-            f"line is the median outcome at age {retirement_age}. Reflects today's asset "
-            f"mix (pick a strategy with holdings to de-risk along the glide)."
-        )
+        caption = ("Add holdings on the Investments page (and pick a strategy) to "
+                   "project these historical returns forward along a glide.")
 
-    bands = percentile_bands(sims)
-    ages = list(range(current_age + 1, current_age + 1 + horizon_years))
-    fig = _fan_figure(bands, ages, start_value, current_age)
+    fig = _returns_panels_figure(
+        weighted_avg, weights, cagr_proj, ann_bands,
+        current_age, retirement_age, date.today().year,
+    )
     return fig, caption
 
 
@@ -1533,112 +1498,124 @@ def _detail_empty(message: str) -> go.Figure:
     return fig
 
 
-def _glide_path_figure(equity_glide: dict | None) -> go.Figure:
-    """Small area chart of equity weight (%) over the accumulation years — the
-    target-date glide the chosen strategy implies, anchored at the portfolio's
-    current equity weight. Empty prompt when there is no glide (no holdings)."""
-    if not equity_glide:
-        return _detail_empty("Add holdings on the Investments page to anchor the glide.")
-    ages = sorted(int(a) for a in equity_glide.keys())
-    eq = [float(equity_glide[a]) * 100.0 for a in ages]
-    fig = go.Figure(go.Scatter(
-        x=ages, y=eq, mode="lines", fill="tozeroy",
-        line=dict(width=2.5, color="#6aae9a"), fillcolor="rgba(120,194,173,0.15)",
-        hovertemplate="Age %{x}<br>%{y:.0f}% equity<extra></extra>",
-    ))
-    fig.update_layout(
-        **_CHART_LAYOUT, height=150, showlegend=False,
-        margin=dict(l=10, r=10, t=10, b=10),
-        xaxis=dict(title=None),
-        yaxis=dict(range=[0, 100], ticksuffix="%", title=None),
-    )
-    return fig
-
-
-def _glide_path_note(s, glide_params) -> str:
-    """One-line readout under the glide chart: the equity path + the effective real
-    CAGR it produces, and the two leg returns it blends."""
-    if not s.return_strategy or not s.equity_glide or not glide_params:
-        return "Flat rate — add holdings and pick a strategy to model a target-date glide."
-    ages = sorted(int(a) for a in s.equity_glide.keys())
-    w0 = float(s.equity_glide[ages[0]]) * 100.0
-    w_term = STRATEGY_TERMINAL_EQUITY[s.return_strategy] * 100.0
-    r_eq = float(glide_params.get("r_equity", 0.0)) * 100.0
-    r_fx = float(glide_params.get("r_fixed", 0.0)) * 100.0
-    path = (f"holds {w0:.0f}% equity" if w0 <= w_term + 1e-9
-            else f"{w0:.0f}% → {w_term:.0f}% equity")
-    return (f"{path} · ≈{s.real_return * 100:.1f}% real "
-            f"(blending {r_eq:.1f}% equity / {r_fx:.1f}% bonds)")
-
-
-def _class_returns_figure(store) -> go.Figure:
-    fig = go.Figure()
-    for cls, series in store.get("class_real_returns", {}).items():
-        years = sorted(int(y) for y in series.keys())
-        if not years:
+def _trailing_cagr(weighted_avg: dict[int, float], window: int | None = None,
+                   min_years: int = 5) -> tuple[list[int], list[float]]:
+    """Trailing geometric-mean (CAGR) of the portfolio's real annual returns, ending at
+    each historical year. With `window=None` (the default) it expands over all available
+    history, so the rightmost point spans the same `n_years` the forward projection
+    resamples; pass `window` to cap it to a rolling N-year mean. Needs at least
+    `min_years` to plot a point. Returns (years, cagr)."""
+    years = sorted(weighted_avg)
+    rets = [weighted_avg[y] for y in years]
+    span = window or len(years)
+    out_years: list[int] = []
+    out_cagr: list[float] = []
+    for i in range(len(years)):
+        w = rets[max(0, i - span + 1): i + 1]
+        if len(w) < min_years:
             continue
-        fig.add_trace(go.Scatter(
-            x=years, y=[series.get(str(y), series.get(y)) for y in years],
-            name=cls, mode="lines",
-            line=dict(width=1.5, color=_CLASS_COLORS.get(cls, "#888")),
-            hovertemplate=f"{cls} · %{{x}}<br>%{{y:.1%}} real<extra></extra>",
-        ))
+        growth = 1.0
+        for r in w:
+            growth *= (1.0 + r)
+        out_years.append(years[i])
+        out_cagr.append(growth ** (1.0 / len(w)) - 1.0)
+    return out_years, out_cagr
 
-    weighted = store.get("weighted_avg", {})
-    if weighted:
-        wyears = sorted(int(y) for y in weighted.keys())
-        fig.add_trace(go.Scatter(
-            x=wyears, y=[weighted.get(str(y), weighted.get(y)) for y in wyears],
-            name="Portfolio weighted avg", mode="lines",
-            line=dict(width=3, color=_C_TOTAL),
-            hovertemplate="Weighted avg · %{x}<br>%{y:.1%} real<extra></extra>",
-        ))
 
-    inflation = store.get("inflation", {})
-    if inflation:
-        iyears = sorted(int(y) for y in inflation.keys())
-        fig.add_trace(go.Scatter(
-            x=iyears, y=[inflation.get(str(y), inflation.get(y)) for y in iyears],
-            name="Inflation", mode="lines",
-            line=dict(width=1.5, color=_C_INFLATION, dash="dot"),
-            hovertemplate="Inflation · %{x}<br>%{y:.1%}<extra></extra>",
-        ))
+# Fan band fills, shared by both panels.
+_FILL_OUTER = "rgba(91,126,201,0.13)"   # 10–90 band
+_FILL_INNER = "rgba(91,126,201,0.28)"   # 25–75 (IQR) band
 
-    fig.add_hline(y=0, line_color="#ccc", line_width=1)
+
+def _returns_panels_figure(weighted_avg, weights, cagr_proj, ann_bands,
+                           current_age, retirement_age, current_year) -> go.Figure:
+    """Two stacked panels sharing a calendar-year x-axis (see render_returns_chart).
+    `weights`/`cagr_proj`/`ann_bands` are None when there's no glide to project — then
+    only the historical halves render."""
+    fig = make_subplots(
+        rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08,
+        row_heights=[0.6, 0.4],
+        subplot_titles=("Average real return (CAGR)", "Annual real return"),
+    )
+
+    # ── Top, past: trailing CAGR of today's portfolio ────────────────────────────
+    cagr_years, cagr_vals = _trailing_cagr(weighted_avg)
+    if cagr_years:
+        fig.add_trace(go.Scatter(
+            x=cagr_years, y=cagr_vals, mode="lines", name="Trailing CAGR",
+            line=dict(width=2.5, color=_C_TOTAL),
+            hovertemplate="%{x}<br>trailing CAGR %{y:.1%}<extra></extra>",
+        ), row=1, col=1)
+
+    horizon = len(weights) if weights else 0
+    fut_years = [current_year + 1 + t for t in range(horizon)]
+
+    # ── Top, future: expected CAGR (geometric mean) + SE band, anchored at today ──
+    if cagr_proj and cagr_proj.get("expected") and horizon:
+        anchor = cagr_vals[-1] if cagr_vals else cagr_proj["expected"][0]
+        xc = [current_year] + fut_years
+
+        def _cone(key):
+            return [anchor] + cagr_proj[key]
+
+        fig.add_trace(go.Scatter(x=xc, y=_cone(75), mode="lines", line=dict(width=0),
+                                 showlegend=False, hoverinfo="skip"), row=1, col=1)
+        fig.add_trace(go.Scatter(x=xc, y=_cone(25), mode="lines", line=dict(width=0),
+                                 fill="tonexty", fillcolor=_FILL_INNER,
+                                 name="CAGR 25–75 SE", hoverinfo="skip"), row=1, col=1)
+        fig.add_trace(go.Scatter(
+            x=xc, y=_cone("expected"), mode="lines", name="Projected CAGR",
+            line=dict(width=2.5, color=_C_WORKING),
+            hovertemplate="%{x}<br>projected CAGR %{y:.1%}<extra></extra>",
+        ), row=1, col=1)
+
+    # ── Bottom, past: realised annual portfolio returns (today's mix) ─────────────
+    if weighted_avg:
+        ay = sorted(weighted_avg)
+        fig.add_trace(go.Scatter(
+            x=ay, y=[weighted_avg[y] for y in ay], mode="lines", name="Realised annual",
+            line=dict(width=1, color="#bbb"),
+            hovertemplate="%{x}<br>annual %{y:.1%}<extra></extra>",
+        ), row=2, col=1)
+
+    # ── Bottom, future: annual-return spread under the gliding allocation ──────────
+    if ann_bands and horizon:
+        fig.add_trace(go.Scatter(x=fut_years, y=ann_bands[90], mode="lines",
+                                 line=dict(width=0), showlegend=False,
+                                 hoverinfo="skip"), row=2, col=1)
+        fig.add_trace(go.Scatter(x=fut_years, y=ann_bands[10], mode="lines",
+                                 line=dict(width=0), fill="tonexty",
+                                 fillcolor=_FILL_OUTER, name="Annual 10–90 pct",
+                                 hoverinfo="skip"), row=2, col=1)
+        fig.add_trace(go.Scatter(x=fut_years, y=ann_bands[75], mode="lines",
+                                 line=dict(width=0), showlegend=False,
+                                 hoverinfo="skip"), row=2, col=1)
+        fig.add_trace(go.Scatter(x=fut_years, y=ann_bands[25], mode="lines",
+                                 line=dict(width=0), fill="tonexty",
+                                 fillcolor=_FILL_INNER, name="Annual 25–75 pct",
+                                 hoverinfo="skip"), row=2, col=1)
+        fig.add_trace(go.Scatter(
+            x=fut_years, y=ann_bands[50], mode="lines", name="Expected annual",
+            line=dict(width=2, color=_C_WORKING, dash="dot"),
+            hovertemplate="%{x}<br>expected annual %{y:.1%}<extra></extra>",
+        ), row=2, col=1)
+
+    # Zero reference + the "today" divider on both panels.
+    for r in (1, 2):
+        fig.add_hline(y=0, line_color="#e3e3e3", line_width=1, row=r, col=1)
+        if horizon:
+            fig.add_vline(x=current_year, line_color="#bbb", line_width=1,
+                          line_dash="dot", row=r, col=1)
+    if horizon:
+        fig.add_annotation(x=current_year, yref="y domain", y=1.0, text="today",
+                           showarrow=False, font=dict(size=10, color="#999"),
+                           xanchor="left", yanchor="bottom", row=1, col=1)
+
     fig.update_layout(
-        **_CHART_LAYOUT, height=280, margin=dict(l=10, r=10, t=30, b=10),
-        xaxis=dict(title="Year", showgrid=False),
-        yaxis=dict(title=None, tickformat=".0%", showgrid=True, gridcolor="#eee", zeroline=False),
+        **_CHART_LAYOUT, height=460, margin=dict(l=10, r=10, t=40, b=10),
         hovermode="x unified",
     )
-    return fig
-
-
-def _fan_figure(bands, ages, start_value, current_age) -> go.Figure:
-    x = [current_age] + ages
-
-    def _band(p):
-        return [start_value] + bands.get(p, [])
-
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=x, y=_band(90), mode="lines", line=dict(width=0),
-                             showlegend=False, hoverinfo="skip"))
-    fig.add_trace(go.Scatter(x=x, y=_band(10), mode="lines", line=dict(width=0),
-                             fill="tonexty", fillcolor="rgba(91,126,201,0.15)",
-                             name="10th–90th pct", hoverinfo="skip"))
-    fig.add_trace(go.Scatter(x=x, y=_band(75), mode="lines", line=dict(width=0),
-                             showlegend=False, hoverinfo="skip"))
-    fig.add_trace(go.Scatter(x=x, y=_band(25), mode="lines", line=dict(width=0),
-                             fill="tonexty", fillcolor="rgba(74,222,128,0.30)",
-                             name="25th–75th (IQR)", hoverinfo="skip"))
-    fig.add_trace(go.Scatter(x=x, y=_band(50), mode="lines",
-                             line=dict(width=2.5, color=_C_TOTAL), name="Median",
-                             hovertemplate="Age %{x}<br>Median %{y:$,.0f}<extra></extra>"))
-    fig.update_layout(
-        **_CHART_LAYOUT, height=280, margin=dict(l=10, r=10, t=30, b=10),
-        xaxis=dict(title="Age", showgrid=False),
-        yaxis=dict(title=None, tickprefix="$", tickformat="~s", showgrid=True,
-                   gridcolor="#eee", zeroline=False),
-        hovermode="x unified",
-    )
+    fig.update_yaxes(tickformat=".0%", showgrid=True, gridcolor="#eee", zeroline=False)
+    fig.update_xaxes(showgrid=False)
+    fig.update_xaxes(title="Year", row=2, col=1)
     return fig

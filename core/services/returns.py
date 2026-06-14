@@ -104,7 +104,11 @@ def nominal_annual_returns(ticker: str) -> pd.Series:
     try:
         import yfinance as yf  # lazy
 
-        hist = yf.Ticker(ticker).history(period="100y", interval="1mo")["Close"]
+        # auto_adjust=True (explicit, not relying on yfinance's default): "Close" is
+        # the dividend- & split-adjusted TOTAL return. Critical for the bond leg, whose
+        # return is almost entirely coupon income — price-only would understate it badly.
+        hist = yf.Ticker(ticker).history(
+            period="100y", interval="1mo", auto_adjust=True)["Close"]
         if hist.empty:
             return pd.Series(dtype="float64")
         annual = hist.resample("YE").last().pct_change().dropna()
@@ -364,6 +368,97 @@ def percentile_bands(sims: np.ndarray, percentiles=_PERCENTILES) -> dict[int, li
     if sims.size == 0:
         return {p: [] for p in percentiles}
     return {p: np.percentile(sims, p, axis=1).tolist() for p in percentiles}
+
+
+def glide_cagr_projection(
+    equity_pool,
+    fixed_pool,
+    equity_weights,
+    r_equity: float,
+    r_fixed: float,
+    band_z: tuple[float, int, int] = (0.6745, 25, 75),
+) -> dict:
+    """Expected cumulative real **CAGR** from today through each future year under a
+    gliding allocation, with a standard-error confidence band.
+
+    The central path is the **geometric** mean (the wealth-reproducing CAGR): for year
+    ``t`` it compounds the glide's per-year expected leg blend ``r_k = w_k·r_equity +
+    (1−w_k)·r_fixed`` and annualises. Using the geometric mean — not a sample median —
+    is what keeps year 1 from spiking: annual equity returns are left-skewed, so the
+    *typical* (median) year sits well above the long-run CAGR, and a median path would
+    start high (~12%) and decay to the geometric mean (~5%) purely from that skew.
+
+    The band is ``central ± z·SE`` with ``SE_t = sqrt(Σ σ_k²)/t`` — the standard error
+    of the ``t``-year average return. It tightens with the horizon (averaging more
+    years) **and** with de-risking (``σ_k``, the SD of the blended historical returns at
+    year ``k``'s weight, falls as the mix moves to bonds). ``band_z`` is
+    ``(z, low_pct, high_pct)``. Returns ``{"expected": [...], low_pct: [...],
+    high_pct: [...]}`` (per-year lists; empty for an empty pool / no weights).
+    """
+    z, lo, hi = band_z
+    eq = np.asarray(equity_pool, dtype="float64")
+    fx = np.asarray(fixed_pool, dtype="float64")
+    n = min(eq.size, fx.size)
+    weights = list(equity_weights or [])
+    if n == 0 or not weights:
+        return {"expected": [], lo: [], hi: []}
+    eq, fx = eq[:n], fx[:n]
+    paired = ~(np.isnan(eq) | np.isnan(fx))
+    eq, fx = eq[paired], fx[paired]
+    if eq.size == 0:
+        return {"expected": [], lo: [], hi: []}
+
+    r_equity, r_fixed = float(r_equity), float(r_fixed)
+    expected: list[float] = []
+    band_lo: list[float] = []
+    band_hi: list[float] = []
+    log_growth = 0.0
+    var_sum = 0.0
+    for t, w in enumerate(weights, start=1):
+        w = float(w)
+        log_growth += float(np.log1p(w * r_equity + (1.0 - w) * r_fixed))
+        cagr = float(np.expm1(log_growth / t))
+        var_sum += float(np.var(w * eq + (1.0 - w) * fx))
+        se = (var_sum ** 0.5) / t
+        expected.append(cagr)
+        band_lo.append(cagr - z * se)
+        band_hi.append(cagr + z * se)
+    return {"expected": expected, lo: band_lo, hi: band_hi}
+
+
+def glide_annual_return_bands(
+    equity_pool,
+    fixed_pool,
+    equity_weights,
+    percentiles=_PERCENTILES,
+) -> dict[int, list[float]]:
+    """Per-year percentile bands of the **annual** portfolio real return under a gliding
+    allocation, computed deterministically (no sampling) from the historical paired
+    equity/fixed real returns.
+
+    For each future year's equity weight ``w`` it blends every historical year
+    (``w·eq_i + (1−w)·fx_i``) and takes percentiles of that empirical distribution. The
+    spread shrinks purely as ``w`` falls toward bonds — the de-risking effect, isolated
+    from any horizon/time-averaging — which is exactly the per-year volatility story.
+    A single index pairs equity & fixed within a year, preserving their co-movement.
+    Returns ``{pct: [return_per_year]}`` (empty lists for an empty pool).
+    """
+    eq = np.asarray(equity_pool, dtype="float64")
+    fx = np.asarray(fixed_pool, dtype="float64")
+    n = min(eq.size, fx.size)
+    if n == 0:
+        return {p: [] for p in percentiles}
+    eq, fx = eq[:n], fx[:n]
+    paired = ~(np.isnan(eq) | np.isnan(fx))
+    eq, fx = eq[paired], fx[paired]
+    if eq.size == 0:
+        return {p: [] for p in percentiles}
+    out: dict[int, list[float]] = {p: [] for p in percentiles}
+    for w in equity_weights:
+        blended = float(w) * eq + (1.0 - float(w)) * fx
+        for p in percentiles:
+            out[p].append(float(np.percentile(blended, p)))
+    return out
 
 
 def suggested_real_return(weighted_avg: pd.Series) -> float:
