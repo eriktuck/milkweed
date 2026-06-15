@@ -127,6 +127,7 @@ _nav_links = dbc.Nav(
         dbc.NavLink([html.I(className="fas fa-chart-bar"), "Investments"], href="/dash/investments", active="exact"),
         dbc.NavLink([html.I(className="fas fa-arrow-trend-up"), "Trends"], href="/dash/trends", active="exact"),
         dbc.NavLink([html.I(className="fas fa-umbrella-beach"), "Coast"], href="/dash/coast", active="exact"),
+        dbc.NavLink([html.I(className="fas fa-book-open"), "Resources"], href="/dash/resources", active="exact"),
         dbc.NavLink([html.I(className="fas fa-id-card"), "Profile"], href="/dash/profile", active="exact"),
         dbc.NavLink([html.I(className="fas fa-gear"), "Settings"], href="/dash/settings", active="exact"),
     ],
