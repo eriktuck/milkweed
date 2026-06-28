@@ -42,6 +42,16 @@ _BUCKET_LABELS = {
     "sinking": "Sinking", "guilt-free": "Guilt-free",
 }
 
+# Fixed categories for the siderail 30-day snapshot (customizable later). Each is
+# a (label, [category_names]) pair; "Total Food Cost" reuses the Q2 composite group.
+SNAPSHOT_ITEMS = [
+    ("Coffee Shops",       ["Coffee Shops"]),
+    ("Taxi & Ride Shares", ["Taxi & Ride Shares"]),
+    ("Apps",               ["Apps"]),
+    ("Public Transit",     ["Public Transit"]),
+    ("Total Food Cost",    [c for cats in T.DEFAULT_FOOD_DINING_PARTS.values() for c in cats]),
+]
+
 
 # ── Formatting helpers ──────────────────────────────────────────────────────────
 
@@ -403,7 +413,7 @@ def render_board(store, use_case, start, end, smoothing, display, baseline,
             q3_fig, q3_stat, q4_fig, q4_stat, meta)
 
 
-# ── Movers rail ───────────────────────────────────────────────────────────────
+# ── Snapshot rail ─────────────────────────────────────────────────────────────
 
 @callback(Output("tr-rail", "children"),
           Input("transaction-data-store", "data"),
@@ -415,84 +425,30 @@ def render_rail(store, use_case, end, baseline):
         raise PreventUpdate
     df = pd.read_json(StringIO(store), orient="split")
 
-    period = T.resolve_current_period(df, use_case, end)
-    note = None
-    effective = baseline
-    level = "category_name"          # trailing/last-year compare at category level
-    baseline_amounts = None
-    is_budget = False
+    snap = T.category_snapshot(df, use_case, items=SNAPSHOT_ITEMS,
+                               as_of=end, baseline=baseline)
+    if snap.empty:
+        return [html.Div("No spending in range.", className="small text-muted")]
+    return _snapshot_section(snap, baseline)
 
-    if baseline == "budget":
-        # Budgets are keyed by CSP key, so the budget baseline compares at csp level.
-        from core.services.firebase import fetch_budget
-        budget = {}
-        if period is not None:
-            budget = fetch_budget(use_case, period.year, period.month)
-        budget = {k: v for k, v in budget.items() if k != "income"}  # income isn't spend
-        if budget:
-            level, baseline_amounts, is_budget = "csp", budget, True
+
+def _snapshot_section(frame, baseline):
+    suffix = "vs last yr" if baseline == "last_year" else "vs avg"
+    rows = []
+    for label, r in frame.iterrows():
+        up = r["delta"] > 0
+        if pd.notna(r["pct_change"]):
+            arrow, cls = ("▲", "text-danger") if up else ("▼", "text-success")
+            delta_txt = f"{arrow}{abs(r['pct_change']):.0%} {suffix}"
         else:
-            effective = "trailing_12mo"
-            when = period.strftime("%b %Y") if period is not None else "this month"
-            note = f"No budget found for {when} — showing trailing 12-mo."
-
-    mv = T.category_movers(df, use_case, as_of=end, baseline=effective,
-                           level=level, baseline_amounts=baseline_amounts)
-
-    sub = f"vs {effective.replace('_', ' ')}"
-    if period is not None:
-        sub += f" · {period.strftime('%b %Y')}"
-    header = [html.H5("What changed", className="mb-0"),
-              html.Div(sub, className="small text-muted mb-2")]
-    if note:
-        header.append(html.Div(note, className="small fst-italic text-warning mb-2"))
-    if mv.empty:
-        return header + [html.Div("No movers in range.", className="small text-muted")]
-
-    over = T.flag_overages(mv)
-    up, down = T.top_movers(mv, 4)
-
-    children = list(header)
-    if not over.empty:
-        children.append(html.Div("⚠ Over budget" if is_budget else "⚠ Temporary overages",
-                                  className="small text-uppercase text-muted mt-3 mb-1"))
-        usual = "budget" if is_budget else "usual"
-        for cat, r in over.iterrows():
-            children.append(html.Div(
-                [html.Span(f"+{_money(r['delta'])} ", className="fw-bold text-danger"),
-                 html.Span(f"{_pretty(cat, is_budget)} — {_money(r['current'])} "
-                           f"vs {_money(r['baseline'])} {usual}", className="small")],
-                className="p-2 mb-1 rounded",
-                style={"background": "rgba(224,105,127,.08)",
-                       "border": "1px solid rgba(224,105,127,.28)"}))
-
-    up_title = "Most over budget ▲" if is_budget else "Biggest movers ▲"
-    down_title = "Most under budget ▼" if is_budget else "Biggest movers ▼"
-    children.append(_mover_section(up_title, up, up=True, pretty=is_budget))
-    children.append(_mover_section(down_title, down, up=False, pretty=is_budget))
-    return children
-
-
-def _pretty(name, is_csp):
-    """CSP keys (lowercase_underscore) → 'Title Case'; category names left as-is."""
-    return str(name).replace("_", " ").title() if is_csp else str(name)
-
-
-def _mover_section(title, frame, *, up, pretty=False):
-    rows = [html.Div(title, className="small text-uppercase text-muted mt-3 mb-1")]
-    if frame.empty:
-        rows.append(html.Div("—", className="small text-muted"))
-        return html.Div(rows)
-    for cat, r in frame.iterrows():
-        pct = r["pct_change"]
-        pct_txt = f"{'▲' if up else '▼'}{abs(pct):.0%}" if pd.notna(pct) else "new"
-        cls = "text-danger" if up else "text-success"
+            cls, delta_txt = "text-muted", "new"
+        border = "#e0697f" if up else "#3f9e86"   # up = pink (more), down = green (less)
         rows.append(html.Div([
-            html.Div([html.Div(_pretty(cat, pretty), className="text-body"),
-                      html.Div(_money(r["current"]), className="small text-muted")],
+            html.Div([html.Div(label, className="text-body"),
+                      html.Div(delta_txt, className=f"small {cls}")],
                      className="flex-grow-1"),
-            html.Span(pct_txt, className=f"fw-bold {cls}"),
+            html.Span(_money(r["current"]), className="fw-bold fs-5"),
         ], className="d-flex align-items-center gap-2 p-2 mb-1 rounded",
             style={"background": "var(--bs-tertiary-bg, #0f1629)",
-                   "borderLeft": f"3px solid {'#e0697f' if up else '#3f9e86'}"}))
+                   "borderLeft": f"3px solid {border}"}))
     return html.Div(rows)

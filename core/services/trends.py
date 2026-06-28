@@ -61,11 +61,7 @@ OTHER_LABEL = "Other"
 COMBINED_LABEL = "Combined"
 TOTAL_INCOME_LABEL = "Total income"
 
-# Movers/overages defaults — the "what counts as an overage" knobs the spec left
-# open. Tunable; chosen to suppress small-dollar noise.
-DEFAULT_MIN_AMOUNT = 50.0       # ignore categories smaller than this in both periods
-DEFAULT_OVERAGE_ABS = 200.0     # an overage must be at least this many $ over baseline
-DEFAULT_OVERAGE_RATIO = 1.5     # ...and at least this multiple of the baseline
+SNAPSHOT_WINDOW_DAYS = 30        # rolling window for the siderail category snapshot
 
 
 # ── Internal helpers ────────────────────────────────────────────────────────────
@@ -320,62 +316,42 @@ def income_split_over_time(
     return out
 
 
-# ── Movers rail — current period vs baseline ─────────────────────────────────────
+# ── Snapshot rail — rolling recent spend vs baseline ─────────────────────────────
 
-def resolve_current_period(df: pd.DataFrame, owner: str | None, as_of=None) -> pd.Period | None:
-    """The 'current month' for movers: the latest spending month present in the
-    data that is ≤ `as_of` (default: the owner's last transaction). This is robust
-    to recency gaps — a date-range end in an empty current calendar month falls
-    back to the last month that actually has spend, so comparisons stay meaningful.
-    Returns None when the owner has no spending."""
-    work = df.copy()
-    work["date"] = pd.to_datetime(work["date"], utc=True, errors="coerce")
-    work = work.dropna(subset=["date"])
-    if owner is not None and "account_owner" in work.columns:
-        work = work[work["account_owner"] == owner]
-    work = work[work["csp_label"] != INCOME_LABEL]
-    if work.empty:
-        return None
-    anchor = _to_utc(as_of) if as_of is not None else work["date"].max()
-    cand = anchor.tz_localize(None).to_period("M")
-    ym = work["date"].dt.tz_localize(None).dt.to_period("M")
-    avail = ym[ym <= cand]
-    return avail.max() if not avail.empty else cand
+_SNAPSHOT_COLUMNS = ["current", "baseline", "delta", "pct_change", "direction"]
 
 
-def category_movers(
+def category_snapshot(
     df: pd.DataFrame,
     owner: str | None,
     *,
+    items: list[tuple[str, list[str]]],
     as_of=None,
     baseline: str = "trailing_12mo",
-    level: str = "category_name",
-    baseline_amounts: dict[str, float] | None = None,
-    min_amount: float = DEFAULT_MIN_AMOUNT,
+    window_days: int = SNAPSHOT_WINDOW_DAYS,
 ) -> pd.DataFrame:
-    """Per-category spend this month vs a baseline — the data behind the rail.
+    """Rolling recent spend per item vs a baseline — the data behind the rail.
 
-    Spending only (income excluded). The current period is the calendar month of
-    `as_of` (default: the latest transaction date for the owner). The baseline is
-    one of:
+    Each item is a ``(label, category_names)`` pair; spend is summed across that
+    item's `category_names`. Spending only (income excluded). ``current`` is the
+    negated signed sum over the last `window_days` (expenses → positive; a net
+    credit stays negative — never ``.abs()``). The window ends at `as_of`
+    (default: the owner's latest transaction date). The baseline is one of:
 
-      * ``trailing_12mo`` — mean monthly spend over the 12 months *before* the
-        current month (Σ over those months ÷ 12);
-      * ``last_year``     — spend in the same calendar month one year earlier;
-      * ``budget``        — the injected ``baseline_amounts`` map (category →
-        monthly budget); categories absent from the map get a 0 baseline.
+      * ``trailing_12mo`` — mean monthly spend over the trailing 12 months
+        (Σ over the 365 days ending at the anchor ÷ 12);
+      * ``last_year``     — spend in the same `window_days` window 365 days back;
+      * ``budget``        — falls back to ``trailing_12mo`` (the fixed snapshot
+        categories have no per-category budgets).
 
-    Returns a DataFrame indexed by `level` with columns
-    ``current, baseline, delta, pct_change, direction`` (``direction`` ∈
-    {up, down, flat}), sorted by `delta` descending. Rows where neither the
-    current nor baseline magnitude reaches `min_amount` are dropped to suppress
-    noise. Empty frame when there's no spend in the current month.
-
-    Note: the baseline window deliberately reaches *before* any chart date-range
-    start — a 12-month baseline needs 12 months of history. Pass the full
-    owner-scoped DataFrame; `as_of` (the page's end-of-range) anchors "now".
-    The current month may be partial; that caveat is left to display/tuning.
+    Returns a DataFrame indexed by item label (input order preserved) with
+    columns ``current, baseline, delta, pct_change, direction`` (``direction`` ∈
+    {up, down, flat}). ``pct_change`` is NaN when the baseline is ≤ 0. Empty
+    frame (with those columns) when there's no usable data.
     """
+    empty = pd.DataFrame(columns=_SNAPSHOT_COLUMNS)
+    empty.index.name = "label"
+
     work = df.copy()
     work["date"] = pd.to_datetime(work["date"], utc=True, errors="coerce")
     work = work.dropna(subset=["date"])
@@ -383,82 +359,43 @@ def category_movers(
         work = work[work["account_owner"] == owner]
     work = work[work["csp_label"] != INCOME_LABEL]
     if work.empty:
-        return _empty_movers(level)
+        return empty
 
-    cur_period = resolve_current_period(df, owner, as_of)
-    if cur_period is None:
-        return _empty_movers(level)
-    # Drop tz before period conversion — month bucketing is tz-agnostic and the
-    # conversion otherwise emits a "dropping timezone information" warning.
-    work["ym"] = work["date"].dt.tz_localize(None).dt.to_period("M")
+    # Anchor "now" at the latest transaction at-or-before `as_of`. The date picker
+    # defaults its end to today, which may be past the last synced transaction —
+    # clamping keeps the rolling window over data that actually exists.
+    latest = work["date"].max()
+    if pd.isna(latest):
+        return empty
+    anchor = min(_to_utc(as_of), latest) if as_of is not None else latest
 
-    # Spending = negated signed sum (expenses → positive; net-credit stays negative).
-    current = work[work["ym"] == cur_period].groupby(level)["amount"].sum().mul(-1)
-    if current.empty and baseline != "budget":
-        return _empty_movers(level)
+    window = pd.Timedelta(days=window_days)
+    year = pd.Timedelta(days=365)
 
-    if baseline == "budget":
-        # Injected monthly budget magnitudes (expected positive); used as-is.
-        base = pd.Series(baseline_amounts or {}, dtype=float)
-    elif baseline == "last_year":
-        base = (
-            work[work["ym"] == (cur_period - 12)]
-            .groupby(level)["amount"].sum().mul(-1)
-        )
-    else:  # trailing_12mo
-        prior = work[(work["ym"] < cur_period) & (work["ym"] >= cur_period - 12)]
-        base = prior.groupby(level)["amount"].sum().mul(-1) / 12.0
+    cur_win = work[(work["date"] > anchor - window) & (work["date"] <= anchor)]
+    if baseline == "last_year":
+        base_anchor = anchor - year
+        base_win = work[(work["date"] > base_anchor - window) & (work["date"] <= base_anchor)]
+        base_divisor = 1.0
+    else:  # trailing_12mo (and budget, which has no per-category budgets)
+        base_win = work[(work["date"] > anchor - year) & (work["date"] <= anchor)]
+        base_divisor = 12.0
 
-    out = pd.DataFrame({"current": current, "baseline": base}).fillna(0.0)
-    out = out[out[["current", "baseline"]].max(axis=1) >= min_amount]
-    if out.empty:
-        return _empty_movers(level)
+    def _spend(frame, cats):
+        return float(frame[frame["category_name"].isin(cats)]["amount"].sum()) * -1
 
-    out["delta"] = out["current"] - out["baseline"]
-    out["pct_change"] = out.apply(
-        lambda r: (r["delta"] / r["baseline"]) if r["baseline"] > 0 else float("nan"),
-        axis=1,
-    )
-    out["direction"] = out["delta"].apply(
-        lambda d: "up" if d > 0 else ("down" if d < 0 else "flat")
-    )
-    out.index.name = level
-    return out.sort_values("delta", ascending=False)
+    rows = []
+    for label, cats in items:
+        current = _spend(cur_win, cats)
+        base = _spend(base_win, cats) / base_divisor
+        delta = current - base
+        pct = (delta / base) if base > 0 else float("nan")
+        rows.append({
+            "current": current, "baseline": base, "delta": delta,
+            "pct_change": pct,
+            "direction": "up" if delta > 0 else ("down" if delta < 0 else "flat"),
+        })
 
-
-def _empty_movers(level: str) -> pd.DataFrame:
-    out = pd.DataFrame(
-        columns=["current", "baseline", "delta", "pct_change", "direction"]
-    )
-    out.index.name = level
+    out = pd.DataFrame(rows, columns=_SNAPSHOT_COLUMNS,
+                       index=pd.Index([label for label, _ in items], name="label"))
     return out
-
-
-def top_movers(movers: pd.DataFrame, n: int = 3) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Split a `category_movers` frame into the top-n risers and top-n fallers."""
-    if movers.empty:
-        return movers, movers
-    up = movers[movers["delta"] > 0].nlargest(n, "delta")
-    down = movers[movers["delta"] < 0].nsmallest(n, "delta")
-    return up, down
-
-
-def flag_overages(
-    movers: pd.DataFrame,
-    *,
-    abs_threshold: float = DEFAULT_OVERAGE_ABS,
-    ratio_threshold: float = DEFAULT_OVERAGE_RATIO,
-) -> pd.DataFrame:
-    """Categories materially above baseline this month — the rail's ⚠ section.
-
-    An overage is both ≥ `abs_threshold` dollars over baseline *and* ≥
-    `ratio_threshold` × the baseline (so a category that merely doubled from $20
-    to $40 doesn't qualify). Sorted by `delta` descending.
-    """
-    if movers.empty:
-        return movers
-    over = movers[
-        (movers["delta"] >= abs_threshold)
-        & (movers["current"] >= movers["baseline"] * ratio_threshold)
-    ]
-    return over.sort_values("delta", ascending=False)
