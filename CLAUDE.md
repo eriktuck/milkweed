@@ -115,3 +115,17 @@ These models are used in `pages/trends.py`. They are independent of Firestore an
 - **Account ownership**: Transactions are attributed to a user or household based on the `accounts` list in each config (joint accounts live under the household document). Ownership, per-account inclusion, and nicknames are edited via **Sync Accounts** on the Settings page, which writes through `save_transaction_account_config` (`core/services/firebase.py`): it rebuilds each config's `accounts` list (one owner per account) plus a `transaction_account_settings` map (`{displayName: {include, nickname}}`).
 - **`uv` for dependency management**: `pyproject.toml` + `uv.lock` are the source of truth; `requirements.txt` is generated from them for Docker.
 - **Cloud Run service name**: `budgetbaby` (the older project name; the repo is `milkweed`).
+
+## Agent skills
+
+### Issue tracker
+
+Issues are tracked in GitHub Issues (github.com/eriktuck/milkweed) via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Default label vocabulary: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: one `CONTEXT.md` and `docs/adr/` at the repo root (created lazily by `/domain-modeling`). See `docs/agents/domain.md`.

@@ -50,6 +50,8 @@ env-file
 *.md
 !README.md
 !CLAUDE.md
+!docs/agents/*.md
+!docs/adr/*.md
 
 # Temp scripts
 tmp/
@@ -61,8 +63,10 @@ firestore-debug.log
 firestore-emulator-data/
 emulator-data/
 
-# Docs (personal analyses)
-docs/
+# Docs (personal analyses) — except agent config and ADRs
+docs/*
+!docs/agents/
+!docs/adr/
 
 # Graphify
 graphify-out
