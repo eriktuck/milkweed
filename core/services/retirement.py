@@ -698,7 +698,7 @@ def default_nest_egg_goal(
     # Social Security: prefer Profile earnings history; else a CSP-income estimate.
     segments = (user_cfg or {}).get("income_segments")
     if segments:
-        from core.utils.functions import segments_to_annual_income
+        from core.domain.social_security import segments_to_annual_income
         pia = annual_pia_from_earnings(segments_to_annual_income(segments))
     else:
         labels = csp_labels or {}
@@ -769,7 +769,7 @@ def retirement_summary(
 # ════════════════════════════════════════════════════════════════════════════
 #
 # Planning-grade and retirement-scoped: the tax math lives here (using the §3
-# constants) rather than editing core.utils.functions.calculate_married_joint_tax
+# constants) rather than editing core.domain.taxes.calculate_married_joint_tax
 # (2024, no LTCG) — that function backs the household models (household.py) and
 # changing it would ripple. Flat-tax decision (Phase 0): brackets + LTCG +
 # standard deduction; no NIIT / SS-taxation / state. Social Security is treated

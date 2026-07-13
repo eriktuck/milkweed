@@ -24,7 +24,8 @@ import plotly.graph_objects as go
 from dash import Input, Output, State, callback, dash_table, dcc, html
 from flask import session
 
-import core.utils.functions as functions
+from core.domain.budget import get_active_csp_plan
+from core.domain.social_security import segments_to_annual_income
 from core.services.firebase import save_retirement_config
 from core.services.forecast import default_monthly_contribution
 from core.services.investments import fetch_latest_holdings
@@ -138,7 +139,7 @@ def _active_plan(user_cfg) -> dict:
     """A user's latest CSP plan (monthly {csp_key: amount}), with the legacy
     fallback the other pages use."""
     csp_plans = (user_cfg or {}).get("csp_plans") or {}
-    return functions.get_active_csp_plan(csp_plans) or (user_cfg or {}).get("csp_plan") or {}
+    return get_active_csp_plan(csp_plans) or (user_cfg or {}).get("csp_plan") or {}
 
 
 def _current_age(user_cfg) -> int:
@@ -962,7 +963,7 @@ def estimate_ss(gross_income, employment_type, career_years, config_data, use_ca
     segments = user_cfg.get("income_segments")
 
     if segments:
-        earnings = functions.segments_to_annual_income(segments)
+        earnings = segments_to_annual_income(segments)
         pia = annual_pia_from_earnings(earnings, emptype)
         n = int((earnings > 0).sum())
         hint = (f"estimated from your Profile income history ({n} year{'' if n == 1 else 's'}) — "

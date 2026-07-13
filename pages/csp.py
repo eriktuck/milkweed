@@ -14,7 +14,7 @@ import pytz
 import dash_ag_grid as dag
 import calendar
 
-from core.utils import functions
+from core.domain.budget import get_active_csp_plan, order_budget
 from core.services.firebase import save_csp_snapshot_to_firestore
 
 CSP_GROUPS = ['Income', 'Fixed Costs', 'Investments', 'Sinking', 'Guilt Free']
@@ -326,7 +326,7 @@ def _csp_from_saved(config, users, snapshot_date=None):
         if snapshot_date and snapshot_date in csp_plans:
             active_plan = csp_plans[snapshot_date]
         else:
-            active_plan = functions.get_active_csp_plan(csp_plans)
+            active_plan = get_active_csp_plan(csp_plans)
             # backward compat: fall back to legacy flat csp_plan for in-flight sessions
             if not active_plan:
                 active_plan = config["users"][user].get("csp_plan") or {}
@@ -367,7 +367,7 @@ def populate_csp(config, source, is_editing, snapshot_date, transactions_json, m
     else:
         csp, jc_values = _csp_from_budget(config, users)
 
-    csp = functions.order_budget(csp, config, users[-1])
+    csp = order_budget(csp, config, users[-1])
     csp['id'] = csp.index
     csp['total'] = csp[users].sum(axis=1)
 

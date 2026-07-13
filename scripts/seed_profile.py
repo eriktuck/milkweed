@@ -3,7 +3,7 @@
 Derives gross-income segments from the official SSA *Earnings Record* in
 data/payroll-data.csv (per-year taxed earnings). Each year becomes a Jan 1
 income segment; consecutive identical years collapse. Uses
-`core.utils.functions.ssa_earnings_to_segments` — the same converter the Profile
+`core.domain.social_security.ssa_earnings_to_segments` — the same converter the Profile
 page's uploader uses, so seed and UI can't drift.
 
 This is a *starting point*: Erik refines exact DOB and layers in mid-year raises
@@ -20,7 +20,7 @@ import os
 import firebase_admin
 from firebase_admin import credentials, firestore
 
-from core.utils.functions import ssa_earnings_to_segments
+from core.domain.social_security import ssa_earnings_to_segments
 
 SERVICE_ACCOUNT = "secrets/firebase-service-account"
 EMULATOR_HOST = "localhost:8090"

@@ -12,7 +12,8 @@ from core.models.session import SessionData
 from core.services.firebase import (
     fetch_all_transactions
 )
-from core.utils import functions
+from core.charts.reports import format_table, plot_report
+from core.domain.budget import build_budget_report, read_budget
 
 dash.register_page(__name__, path='/')
 
@@ -297,20 +298,20 @@ def update_plot(transactions_data, start_date, end_date, user, config_json):
     end_date = dt.fromisoformat(end_date)
     
     # Read budget
-    budget = functions.read_budget(config.data, user)
+    budget = read_budget(config.data, user)
     
     # Read transactions
     transactions = pd.read_json(StringIO(transactions_data), orient='split')
     
     # Create budget report
-    budget_report = functions.build_budget_report(
+    budget_report = build_budget_report(
         transactions, budget, start_date, end_date, config.data, user)
     
     if budget_report['amount'].abs().sum() == 0:
         return html.P("No transactions found.")
     
     # Update chart
-    fig = functions.plot_report(budget_report, start_date, end_date)
+    fig = plot_report(budget_report, start_date, end_date)
 
     return dcc.Graph(
         id='budget-chart',
@@ -392,7 +393,7 @@ def update_table(clickData, transactions_data, start_date, end_date,
             "font-family": "inherit",  # Use the default font of the Dash app
         }
                 
-        pretty_transactions = functions.format_table(transactions)
+        pretty_transactions = format_table(transactions)
         transaction_table = dbc.Table.from_dataframe(pretty_transactions,
                                                      striped=True,
                                                      bordered=True,

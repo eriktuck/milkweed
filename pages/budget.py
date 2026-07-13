@@ -11,7 +11,13 @@ from datetime import datetime as dt
 from dateutil.relativedelta import relativedelta
 from io import StringIO
 
-from core.utils import functions
+from core.domain.budget import (
+    generate_budget_from_csp,
+    get_active_csp_plan,
+    get_monthly_loading,
+    order_budget,
+    read_budget,
+)
 from core.services.firebase import save_budget_to_firestore
 
 dash.register_page(__name__, path='/budget')
@@ -201,7 +207,7 @@ def populate_budget(year, config, user):
 
     year = int(year)
     config = json.loads(config)
-    budget = functions.read_budget(config, user)
+    budget = read_budget(config, user)
 
     all_year_cols = [(year, m) for m in range(1, 13)]
     if not any(col in budget.columns for col in all_year_cols):
@@ -225,7 +231,7 @@ def populate_budget(year, config, user):
     new_rows = pd.DataFrame(np.nan, index=CSP_GROUPS, columns=budget.columns)
     budget = pd.concat([budget, new_rows])
 
-    budget = functions.order_budget(budget, config, user)
+    budget = order_budget(budget, config, user)
     budget['id'] = budget.index
     month_columns = [col for col in budget.columns if col not in ["category", "csp_label", "id"]]
 
@@ -560,7 +566,7 @@ def preview_new_budget(n_clicks, new_year, methods, pcts, config_json, user, tra
     pct_map = {cat: (pcts[i] or 100) / 100 for i, cat in enumerate(categories)}
 
     # LY budget — slice only existing columns to avoid KeyError
-    budget = functions.read_budget(config, user)
+    budget = read_budget(config, user)
     ly_cols = [(ly, m) for m in range(1, 13) if (ly, m) in budget.columns]
     ly_budget = budget[ly_cols] if ly_cols else pd.DataFrame(index=budget.index)
 
@@ -600,7 +606,7 @@ def preview_new_budget(n_clicks, new_year, methods, pcts, config_json, user, tra
 
         elif method == 'copy_actuals':
             ly_period = [(ly, m) for m in range(1, 13)]
-            loading = functions.get_monthly_loading(ly_budget, category, ly_period)
+            loading = get_monthly_loading(ly_budget, category, ly_period)
             ly_total = float(ly_actuals.get(category, 0.0))
             for i, month in enumerate(range(1, 13)):
                 new_budget_months[month][category] = round(ly_total * loading[i] * pct, 2)
@@ -673,14 +679,14 @@ def apply_csp_to_budget(n_clicks, start_month, config_json, user, current_option
     config = json.loads(config_json)
 
     csp_plans = config["users"][user].get("csp_plans") or {}
-    active_plan = functions.get_active_csp_plan(csp_plans)
+    active_plan = get_active_csp_plan(csp_plans)
     # backward compat: fall back to legacy flat csp_plan for in-flight sessions
     if not active_plan:
         active_plan = config["users"][user].get("csp_plan") or {}
     if not active_plan:
         raise PreventUpdate
 
-    budget = functions.read_budget(config, user)
+    budget = read_budget(config, user)
     cat_order = config["users"][user]['cat_order']
     categories = [c for c in cat_order if c not in CSP_GROUPS and c not in NON_BUDGETABLE]
 
@@ -689,7 +695,7 @@ def apply_csp_to_budget(n_clicks, start_month, config_json, user, current_option
         window_start = dt(year, month, 1)
     else:
         window_start = dt.today().replace(day=1) + relativedelta(months=1)
-    generated = functions.generate_budget_from_csp(active_plan, budget, categories, window_start)
+    generated = generate_budget_from_csp(active_plan, budget, categories, window_start)
 
     # Merge into config — only forward months, historical months untouched
     for year_str, months in generated.items():

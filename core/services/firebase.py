@@ -7,7 +7,7 @@ import pandas as pd
 import pytz
 from datetime import datetime as dt
 
-from core.utils.functions import (
+from core.domain.transactions import (
     convert_raw_transactions_to_dataframe,
     preprocess_transactions,
     process_and_attribute_transactions

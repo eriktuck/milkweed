@@ -19,7 +19,7 @@ from dash.exceptions import PreventUpdate
 from flask import session
 
 from core.services.firebase import save_user_profile
-from core.utils.functions import segments_to_annual_income, ssa_earnings_to_segments
+from core.domain.social_security import segments_to_annual_income, ssa_earnings_to_segments
 
 dash.register_page(__name__, path="/profile")
 

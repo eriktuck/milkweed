@@ -7,7 +7,7 @@ Firestore coupling — the only external dependency is the injected DataFrame,
 plus an optional injected mapping for the Budget baseline. The Plotly figure
 builders (Phase 4.2) consume these frames; the page callbacks (4.3) wire them.
 
-Column conventions (see core/utils/functions.py::categorize_transactions):
+Column conventions (see core/domain/transactions.py::categorize_transactions):
     csp_label ∈ {income, fixed, investments, sinking, guilt-free}  — the bucket
     csp                                                            — finer CSP key
     category_name                                                  — Monarch category

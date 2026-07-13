@@ -138,7 +138,7 @@ def _resolve_pia(
     """
     segments = (user_cfg or {}).get("income_segments")
     if segments:
-        from core.utils.functions import segments_to_annual_income
+        from core.domain.social_security import segments_to_annual_income
 
         return annual_pia_from_earnings(segments_to_annual_income(segments))
 
