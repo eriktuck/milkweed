@@ -5,7 +5,7 @@ Pins the CURRENT behavior of:
   * core/services/forecast.py pure functions (project_portfolio,
     forecast_summary, required_monthly_contribution, defaults,
     trailing_12mo_contribution)
-  * core/services/retirement.py::project_balances_to_retirement and
+  * core/domain/assumptions.py::project_balances_to_retirement and
     default_contribution_allocation (they feed the lifetime walk)
 
 project_portfolio / forecast_summary are slated for DELETION in Phase 5 on the
@@ -39,7 +39,7 @@ from core.services.forecast import (
     trailing_12mo_contribution,
 )
 from core.services.projection import simulate_lifetime
-from core.services.retirement import (
+from core.domain.assumptions import (
     default_contribution_allocation,
     project_balances_to_retirement,
 )

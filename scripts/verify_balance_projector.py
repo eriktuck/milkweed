@@ -12,7 +12,7 @@ Run from the repo root:
 """
 
 from core.services.forecast import project_portfolio
-from core.services.retirement import (
+from core.domain.assumptions import (
     PRETAX_CONTRIB_CAP,
     ROTH_CONTRIB_CAP,
     default_contribution_allocation,

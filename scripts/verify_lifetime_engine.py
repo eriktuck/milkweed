@@ -18,11 +18,8 @@ Run from the repo root:
 
 from core.services.forecast import forecast_summary, project_portfolio
 from core.services.projection import simulate_lifetime
-from core.services.retirement import (
-    default_nest_egg_goal,
-    project_balances_to_retirement,
-    project_retirement_taxaware,
-)
+from core.domain.assumptions import project_balances_to_retirement
+from core.domain.drawdown import default_nest_egg_goal, project_retirement_taxaware
 
 # Column contract of the legacy tax-aware drawdown (order matters).
 GOLDEN_COLS = [

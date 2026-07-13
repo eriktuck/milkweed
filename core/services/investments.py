@@ -24,6 +24,7 @@ import yfinance as yf
 from pydantic import BaseModel
 from firebase_admin import firestore
 
+from core.domain.holdings import buckets_from_holdings, gain_fraction_from_cost_basis
 from core.services.firebase import db, commit_in_batches
 
 _log = logging.getLogger(__name__)
@@ -439,6 +440,29 @@ def fetch_cost_basis(uid: str) -> dict:
     )
     doc = ref.get()
     return doc.to_dict().get("accounts", {}) if doc.exists else {}
+
+
+def balances_by_tax_bucket(uid: str, investment_accounts: dict | None) -> dict:
+    """Aggregate current holdings into {taxable, trad, roth, total}.
+
+    Thin fetch+domain wrapper (moved from core/services/retirement.py, Phase 4):
+    reads the holdings snapshot then delegates to the pure
+    `core.domain.holdings.buckets_from_holdings` — kept at the edge so the
+    projection math stays pure and testable.
+    """
+    return buckets_from_holdings(fetch_latest_holdings(uid), investment_accounts)
+
+
+def taxable_gain_fraction(uid: str, investment_accounts: dict | None) -> float | None:
+    """Derive the taxable gain fraction from the user's uploaded cost-basis report.
+
+    Thin fetch+domain wrapper (moved from core/services/retirement.py, Phase 4)
+    around the pure `core.domain.holdings.gain_fraction_from_cost_basis`.
+    Returns None if the user has not uploaded a cost-basis CSV (or none of it is
+    in taxable accounts), so the income pane falls back to the editable
+    drawdown.TAXABLE_GAIN_FRACTION default.
+    """
+    return gain_fraction_from_cost_basis(fetch_cost_basis(uid), investment_accounts)
 
 
 def process_and_upload_cost_basis_csv(

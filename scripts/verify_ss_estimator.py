@@ -9,7 +9,7 @@ Run from the repo root:
     python -m scripts.verify_ss_estimator
 """
 
-from core.services.retirement import (
+from core.domain.social_security import (
     SS_BEND_POINTS,
     SS_WAGE_BASE,
     covered_earnings,

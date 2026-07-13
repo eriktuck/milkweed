@@ -1,18 +1,127 @@
-"""Social Security helpers: income-segment integration, SSA earnings-record CSV
-parsing, and the legacy 2024-bend-point benefit estimator.
+"""Social Security: the 2025 PIA pipeline, income-segment integration, SSA
+earnings-record CSV parsing, and the legacy 2024-bend-point benefit estimator.
 
-Moved verbatim from core/utils/functions.py (Phase 3 of the core/
-restructuring); pinned by tests/test_retirement_math.py.
+The segment/CSV helpers and `calculate_social_security_benefit` moved verbatim
+from core/utils/functions.py (Phase 3 of the core/ restructuring); the PIA
+pipeline (covered_earnings → AIME → primary_insurance_amount →
+social_security_income, 2025 constants) moved verbatim from
+core/services/retirement.py (Phase 4). Pinned by tests/test_retirement_math.py.
 
-FUTURE HOME (Phase 4): the PIA pipeline from core/services/retirement.py
-(covered_earnings, primary_insurance_amount, annual_pia_from_earnings,
-social_security_income) and a consolidated resolve_pia (Phase 5).
+FUTURE HOME (Phase 5): a consolidated resolve_pia (deduplicating
+scenario._resolve_pia and drawdown.default_nest_egg_goal). Later feature work:
+pad_earnings_to_35 (see docs/porting-backlog.md once created).
 """
 import csv
 import io
 
 import numpy as np
 import pandas as pd
+
+# ── 2025 benefit-formula constants — research §"Social Security" ─────────────────
+#
+# Monthly AIME bend points and the 90/32/15 replacement rates; AIME averages the
+# top 35 wage-indexed years (÷ 420 months). The OASDI taxable maximum caps annual
+# covered earnings; self-employment (1099) covered earnings = net × 0.9235.
+SS_WAGE_BASE: float = 176_100.0                       # 2025 OASDI taxable maximum
+SS_BEND_POINTS: tuple[float, float] = (1_226.0, 7_391.0)   # monthly AIME
+SS_REPLACEMENT_RATES: tuple[float, float, float] = (0.90, 0.32, 0.15)
+SE_COVERED_FRACTION: float = 0.9235                   # net SE income → covered earnings
+AIME_YEARS: int = 35                                  # SS averages the top 35 years
+
+# Social Security claim-age PIA factors (FRA 67). 62→70.
+SS_PIA_FACTOR_BY_CLAIM_AGE: dict[int, float] = {
+    62: 0.70, 63: 0.75, 64: 0.80, 65: 0.8667, 66: 0.9333,
+    67: 1.00, 68: 1.08, 69: 1.16, 70: 1.24,
+}
+
+
+def covered_earnings(gross_income: float, employment_type: str = "W2") -> float:
+    """Annual Social-Security-covered earnings from gross income.
+
+    W2: gross wages, capped at the OASDI taxable maximum. 1099 (self-employed):
+    net SE income × 0.9235, then capped. 'mixed': treated as W2 (the 0.9235
+    haircut only applies to a self-employment portion we don't separately
+    capture) — a documented v1 simplification.
+    """
+    g = max(float(gross_income or 0.0), 0.0)
+    if str(employment_type).lower() in {"1099", "self-employed", "se"}:
+        g *= SE_COVERED_FRACTION
+    return min(g, SS_WAGE_BASE)
+
+
+def primary_insurance_amount(aime_monthly: float) -> float:
+    """Monthly PIA from AIME via the bend-point formula (90% / 32% / 15%)."""
+    b1, b2 = SS_BEND_POINTS
+    r1, r2, r3 = SS_REPLACEMENT_RATES
+    a = max(float(aime_monthly), 0.0)
+    pia = r1 * min(a, b1)
+    if a > b1:
+        pia += r2 * (min(a, b2) - b1)
+    if a > b2:
+        pia += r3 * (a - b2)
+    return pia
+
+
+def estimate_annual_pia_from_income(
+    gross_income: float,
+    employment_type: str = "W2",
+    career_years: int = AIME_YEARS,
+) -> float:
+    """Annual Social Security benefit **at FRA (67)** estimated from income.
+
+    Assumes a roughly constant `gross_income` earned over `career_years`; years
+    short of 35 average in $0 (AIME always divides by 35), so a shorter career
+    lowers the benefit. Pipeline: covered earnings → AIME (top-35 monthly
+    average) → PIA → ×12. The **claim-age factor is applied downstream** by
+    `social_security_income`, so this returns the FRA figure that seeds the
+    editable `SS benefit at FRA` input (the SSA-statement override).
+    """
+    earnings = covered_earnings(gross_income, employment_type)
+    years = min(max(int(career_years), 0), AIME_YEARS)
+    aime = earnings * years / (AIME_YEARS * 12)
+    return primary_insurance_amount(aime) * 12.0
+
+
+def annual_pia_from_earnings(earnings, employment_type: str = "W2") -> float:
+    """Annual Social Security benefit **at FRA (67)** from a real per-year earnings
+    series (e.g. the Profile income history via segments_to_annual_income).
+
+    The accurate counterpart to `estimate_annual_pia_from_income`: instead of
+    assuming a constant income, it uses actual annual earnings. Each year is capped
+    at the OASDI wage base via `covered_earnings`; the top 35 form the AIME (always
+    divided by 35×12, so a short career averages in $0). Returns the FRA figure; the
+    claim-age factor is applied downstream by `social_security_income`.
+
+    `earnings` is any iterable of annual gross amounts (pd.Series or list).
+    """
+    covered = [covered_earnings(v, employment_type) for v in earnings
+               if v is not None and float(v) > 0]
+    if not covered:
+        return 0.0
+    top = sorted(covered, reverse=True)[:AIME_YEARS]
+    aime = sum(top) / (AIME_YEARS * 12)
+    return primary_insurance_amount(aime) * 12.0
+
+
+def social_security_income(
+    pia_annual: float,
+    claim_age: int,
+    retirement_age: int,
+    death_age: int,
+) -> pd.Series:
+    """Annual Social Security income by age (0 before the later of claim age and
+    retirement age), with the claim-age factor applied to the PIA.
+
+    `pia_annual` is the annual benefit at Full Retirement Age (67). The full
+    earnings-based PIA derivation (`calculate_social_security_benefit`) is left
+    for when working-years earnings are captured; here the user supplies their
+    SSA estimate and the claim-age slider scales it.
+    """
+    factor = SS_PIA_FACTOR_BY_CLAIM_AGE.get(int(claim_age), 1.0)
+    benefit = float(pia_annual or 0.0) * factor
+    start = max(int(claim_age), int(retirement_age))
+    ages = range(int(retirement_age), int(death_age) + 1)
+    return pd.Series({age: (benefit if age >= start else 0.0) for age in ages})
 
 
 def calculate_social_security_benefit(earnings: pd.Series, claim_age: int) -> float:

@@ -16,13 +16,13 @@ real glide toward less-risky assets in retirement):
     coast      (coast ≤ age < ret):  each bucket  V·(1+r_accum)            (no new money)
     retirement (age ≥ ret):          allocate → RMD → grow at r_retire
                                       (the tax-aware draw lifted from
-                                       retirement.project_retirement_taxaware)
+                                       drawdown.project_retirement_taxaware)
 
 Pure — no Firestore or network. The accumulation recurrence is identical to
 forecast.project_portfolio's working phase, so the aggregate of the three buckets
 at retirement reconciles with the Forecast page (gated by
 scripts/verify_lifetime_engine.py). The retirement-phase loop body is the same
-math as retirement.project_retirement_taxaware, so that function becomes a thin
+math as drawdown.project_retirement_taxaware, so that function becomes a thin
 wrapper with byte-identical output.
 
 See .planning/SPEC-rationalize-pages.md for the full design.
@@ -32,14 +32,14 @@ from __future__ import annotations
 
 import pandas as pd
 
-from core.services.retirement import (
+from core.domain.assumptions import phase_for_age
+from core.domain.drawdown import (
     TAXABLE_GAIN_FRACTION,
-    _allocate_withdrawals,
-    _as_age_lookup,
-    annual_tax,
-    phase_for_age,
-    required_min_distribution,
+    allocate_withdrawals,
+    as_age_lookup,
 )
+from core.domain.rmd import required_min_distribution
+from core.domain.taxes import annual_tax
 
 # Column order for the unified frame. Accumulation rows zero-fill the drawdown
 # columns; retirement rows zero-fill `contribution`. `life_phase` is the timeline
@@ -102,12 +102,12 @@ def simulate_lifetime(
         _ra_const = float(r_accum)
         ra_at = lambda age: _ra_const  # noqa: E731
     else:
-        _ra_map = _as_age_lookup(r_accum)
+        _ra_map = as_age_lookup(r_accum)
         _ra_fallback = _ra_map[max(_ra_map)] if _ra_map else 0.0
         ra_at = lambda age: _ra_map.get(age, _ra_fallback)  # noqa: E731
     rr = float(r_retire)
-    ss = _as_age_lookup(ss_by_age)
-    health = _as_age_lookup(healthcare_by_age)
+    ss = as_age_lookup(ss_by_age)
+    health = as_age_lookup(healthcare_by_age)
     gain_frac = float(gain_fraction)
 
     taxable = float(buckets.get("taxable", 0.0))
@@ -157,7 +157,7 @@ def simulate_lifetime(
         w_taxable = w_trad = w_roth = excess_rmd = 0.0
         for _ in range(8):
             target = cash_need + tax
-            w_taxable, w_trad, w_roth, excess_rmd, _short = _allocate_withdrawals(
+            w_taxable, w_trad, w_roth, excess_rmd, _short = allocate_withdrawals(
                 target, taxable, trad, roth, rmd)
             ordinary_income = w_trad                 # all trad draws are ordinary
             ltcg_gain = w_taxable * gain_frac

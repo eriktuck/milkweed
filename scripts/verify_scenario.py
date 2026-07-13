@@ -17,7 +17,7 @@ Run from the repo root:
 """
 
 from core.services.forecast import forecast_summary, project_portfolio
-from core.services.retirement import default_nest_egg_goal
+from core.domain.drawdown import default_nest_egg_goal
 from core.services.scenario import build_scenario
 
 TOL = 1e-3

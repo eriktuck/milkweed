@@ -8,8 +8,8 @@ existing pure helpers into one result object carrying the full lifetime walk and
 every headline number (the four BANs).
 
 It does **not** introduce new math. It orchestrates:
-  * backward-from-spending goal — `retirement.project_retirement` → `nest_egg_goal`
-    (the same pipeline as `retirement.default_nest_egg_goal`, but driven by the
+  * backward-from-spending goal — `drawdown.project_retirement` → `nest_egg_goal`
+    (the same pipeline as `drawdown.default_nest_egg_goal`, but driven by the
     *live* slider ages and tuned spend/healthcare/SS instead of only config);
   * forward lifetime walk — `projection.simulate_lifetime` (accumulation → coast →
     tax-aware drawdown), whose accumulation aggregate reconciles with the old
@@ -24,7 +24,7 @@ scripts/verify_scenario.py.
 
 Pure: callers pass deserialized config dicts and the current `buckets` (read from
 the holdings snapshot at the page edge, mirroring how the old pages called
-`balances_by_tax_bucket`). No Firestore or network here.
+`investments.balances_by_tax_bucket`). No Firestore or network here.
 """
 
 from __future__ import annotations
@@ -48,20 +48,24 @@ from core.domain.glide import (
     retirement_rate,
 )
 from core.services.projection import simulate_lifetime
-from core.services.retirement import (
+from core.domain.assumptions import (
     DEFAULTS,
     PHASES,
-    TAXABLE_GAIN_FRACTION,
-    annual_pia_from_earnings,
     annual_spend_by_phase,
     default_contribution_allocation,
-    estimate_annual_pia_from_income,
-    healthcare_costs_by_age,
-    nest_egg_goal,
-    project_retirement,
     resolve_assumptions,
     resolve_phase_factors,
-    rmd_start_age,
+)
+from core.domain.drawdown import (
+    TAXABLE_GAIN_FRACTION,
+    nest_egg_goal,
+    project_retirement,
+)
+from core.domain.healthcare import healthcare_costs_by_age
+from core.domain.rmd import rmd_start_age
+from core.domain.social_security import (
+    annual_pia_from_earnings,
+    estimate_annual_pia_from_income,
     social_security_income,
 )
 
@@ -131,7 +135,7 @@ def _resolve_pia(
 ) -> float:
     """Annual Social Security benefit at FRA, preferring real earnings history.
 
-    Mirrors `retirement.default_nest_egg_goal`: use the Profile income segments via
+    Mirrors `drawdown.default_nest_egg_goal`: use the Profile income segments via
     `annual_pia_from_earnings` when present, else estimate from the CSP `income`
     line, else 0. Kept here so the slider-driven goal uses the identical SS basis
     the config-default goal does.
@@ -183,7 +187,7 @@ def build_scenario(
     """Build the full Coast scenario from config + the two live inputs.
 
     `buckets` is the current {taxable, trad, roth, total} balance map (the page
-    reads it from the holdings snapshot via `retirement.balances_by_tax_bucket`).
+    reads it from the holdings snapshot via `investments.balances_by_tax_bucket`).
     Live inputs and assumption overrides fall back to the user's config / plan
     defaults when None, so a fresh page load with no interaction renders a complete,
     sensible scenario. Pure — see module docstring.

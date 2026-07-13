@@ -15,7 +15,7 @@ from core.services.investments import (
     detect_vanguard_csv_type,
     parse_vanguard_cost_basis_csv,
 )
-from core.services.retirement import gain_fraction_from_cost_basis
+from core.domain.holdings import gain_fraction_from_cost_basis
 
 DATA = Path(__file__).resolve().parent.parent / "data"
 

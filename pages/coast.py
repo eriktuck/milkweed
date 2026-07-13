@@ -26,30 +26,36 @@ from flask import session
 
 from core.domain.budget import get_active_csp_plan
 from core.domain.social_security import segments_to_annual_income
-from core.services.firebase import save_retirement_config
-from core.services.forecast import default_monthly_contribution
-from core.services.investments import fetch_latest_holdings
-from core.services.retirement import (
+from core.domain.assumptions import (
     DEFAULT_PHASE_FACTOR,
+    PHASES,
+    annual_spend_by_phase,
+    default_contribution_allocation,
+    household_expense_share,
+    merge_household_expenses,
+    phase_for_age,
+    resolve_assumptions,
+    resolve_phase_factors,
+)
+from core.domain.drawdown import TAXABLE_GAIN_FRACTION
+from core.domain.healthcare import (
     HC_ACA_ANNUAL,
     HC_OOP_ANNUAL,
     LTC_DEFAULT_ANNUAL,
     LTC_DEFAULT_START_AGE,
     LTC_DEFAULT_TYPE,
     MEDICARE_PART_B_MONTHLY_2025,
-    PHASES,
-    TAXABLE_GAIN_FRACTION,
+)
+from core.domain.rmd import rmd_start_age
+from core.domain.social_security import (
     annual_pia_from_earnings,
-    annual_spend_by_phase,
-    balances_by_tax_bucket,
-    default_contribution_allocation,
     estimate_annual_pia_from_income,
-    household_expense_share,
-    merge_household_expenses,
-    phase_for_age,
-    resolve_assumptions,
-    resolve_phase_factors,
-    rmd_start_age,
+)
+from core.services.firebase import save_retirement_config
+from core.services.forecast import default_monthly_contribution
+from core.services.investments import (
+    balances_by_tax_bucket,
+    fetch_latest_holdings,
     taxable_gain_fraction,
 )
 from core.services.returns import (

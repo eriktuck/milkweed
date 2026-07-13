@@ -10,7 +10,7 @@ Run from the repo root:
     python -m scripts.verify_healthcare
 """
 
-from core.services.retirement import (
+from core.domain.healthcare import (
     HC_ACA_ANNUAL,
     HC_OOP_ANNUAL,
     MEDICARE_AGE,

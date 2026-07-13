@@ -1,5 +1,6 @@
-"""Characterization tests for core/services/retirement.py + SS/tax helpers in
-core/utils/functions.py.
+"""Characterization tests for the retirement math in core/domain/ (assumptions,
+taxes, social_security, healthcare, rmd, drawdown, holdings — dissolved out of
+core/services/retirement.py in Phase 4) + SS/tax helpers in core/utils/functions.py.
 
 These pin the CURRENT behavior of main (2026-07 characterization epoch) as the
 safety net for the core/domain/ restructuring. Every literal below was produced
@@ -17,7 +18,9 @@ import pandas as pd
 import pytest
 from pandas.testing import assert_frame_equal
 
-from core.services import retirement as ret
+from core.domain import assumptions, drawdown, healthcare, holdings, rmd
+from core.domain import social_security
+from core.domain import taxes
 from core.utils import functions as fn
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -68,22 +71,22 @@ SSA_CSV = (
 
 
 def _ss_series() -> pd.Series:
-    return ret.social_security_income(40_000.0, 67, 65, 90)
+    return social_security.social_security_income(40_000.0, 67, 65, 90)
 
 
 def _hc_series() -> pd.Series:
-    return ret.healthcare_costs_by_age(65, 90)
+    return healthcare.healthcare_costs_by_age(65, 90)
 
 
 def _projection() -> pd.DataFrame:
-    return ret.project_retirement(
+    return drawdown.project_retirement(
         1_500_000.0, 65, 90, SPEND_BY_PHASE, 75, 85, 0.05,
         income_by_age=_ss_series(), healthcare_by_age=_hc_series(),
     )
 
 
 def _taxaware() -> pd.DataFrame:
-    return ret.project_retirement_taxaware(
+    return drawdown.project_retirement_taxaware(
         {"taxable": 600_000.0, "trad": 700_000.0, "roth": 200_000.0},
         65, 90, SPEND_BY_PHASE, 75, 85, 0.05,
         ss_by_age=_ss_series(), healthcare_by_age=_hc_series(),
@@ -127,7 +130,7 @@ def _read_golden(path, index_col: str) -> pd.DataFrame:
 ])
 def test_annual_tax_ordinary_boundaries(income, expected):
     """Ordinary-only MFJ tax at (and between) 2025 bracket edges."""
-    assert ret.annual_tax(income) == approx(expected)
+    assert taxes.annual_tax(income) == approx(expected)
 
 
 @pytest.mark.parametrize("ordinary, ltcg, expected", [
@@ -141,7 +144,7 @@ def test_annual_tax_ordinary_boundaries(income, expected):
 ])
 def test_annual_tax_ltcg_stacking(ordinary, ltcg, expected):
     """LTCG stacks on top of taxable ordinary income."""
-    assert ret.annual_tax(ordinary, ltcg) == approx(expected)
+    assert taxes.annual_tax(ordinary, ltcg) == approx(expected)
 
 
 def test_annual_tax_no_niit_above_threshold():
@@ -151,7 +154,7 @@ def test_annual_tax_no_niit_above_threshold():
     # annual_tax never applies them: 65_134 = ordinary 50_134 + 15% × 100_000.
     # (The module docstring calls this a documented Phase-0 simplification.)
     """
-    assert ret.annual_tax(300_000.0, 100_000.0) == approx(65_134.0)
+    assert taxes.annual_tax(300_000.0, 100_000.0) == approx(65_134.0)
 
 
 @pytest.mark.parametrize("amount, expected", [
@@ -163,7 +166,7 @@ def test_annual_tax_no_niit_above_threshold():
 ])
 def test_progressive_tax_edges(amount, expected):
     """_progressive_tax through the 2025 MFJ ordinary table."""
-    assert ret._progressive_tax(amount, ret.ORDINARY_BRACKETS_MFJ) == approx(expected)
+    assert taxes.progressive_tax(amount, taxes.ORDINARY_BRACKETS_MFJ) == approx(expected)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -182,7 +185,7 @@ def test_progressive_tax_edges(amount, expected):
 ])
 def test_covered_earnings(gross, emp, expected):
     """W2 vs self-employed covered earnings, wage-base cap, clamps."""
-    assert ret.covered_earnings(gross, emp) == approx(expected)
+    assert social_security.covered_earnings(gross, emp) == approx(expected)
 
 
 @pytest.mark.parametrize("aime, expected", [
@@ -197,7 +200,7 @@ def test_covered_earnings(gross, emp, expected):
 ])
 def test_primary_insurance_amount_bend_points(aime, expected):
     """90/32/15 bend-point formula at and around both bend points."""
-    assert ret.primary_insurance_amount(aime) == approx(expected)
+    assert social_security.primary_insurance_amount(aime) == approx(expected)
 
 
 @pytest.mark.parametrize("gross, emp, years, expected", [
@@ -210,35 +213,35 @@ def test_primary_insurance_amount_bend_points(aime, expected):
 ])
 def test_estimate_annual_pia_from_income(gross, emp, years, expected):
     """Constant-income FRA benefit estimate."""
-    assert ret.estimate_annual_pia_from_income(gross, emp, years) == approx(expected)
+    assert social_security.estimate_annual_pia_from_income(gross, emp, years) == approx(expected)
 
 
 def test_annual_pia_from_earnings():
     """Real earnings series: top-35 AIME, None/zero filtering, empty → 0."""
-    assert ret.annual_pia_from_earnings([100_000.0] * 35) == approx(38_610.6)
+    assert social_security.annual_pia_from_earnings([100_000.0] * 35) == approx(38_610.6)
     # 40 rising years — only the top 35 count
     rising = [50_000 + 2_000 * i for i in range(40)]
-    assert ret.annual_pia_from_earnings(rising) == approx(37_710.6)
+    assert social_security.annual_pia_from_earnings(rising) == approx(37_710.6)
     # None and 0 years are dropped before the top-35 sort
-    assert ret.annual_pia_from_earnings([None, 0, 100_000.0, 100_000.0]) == approx(
+    assert social_security.annual_pia_from_earnings([None, 0, 100_000.0, 100_000.0]) == approx(
         5_142.857142857143)
-    assert ret.annual_pia_from_earnings([]) == 0.0
+    assert social_security.annual_pia_from_earnings([]) == 0.0
 
 
 def test_social_security_income_claim_factors():
     """Claim-age factor scales the PIA; benefit starts at max(claim, retirement)."""
-    ss = ret.social_security_income(40_000.0, 70, 67, 75)
+    ss = social_security.social_security_income(40_000.0, 70, 67, 75)
     assert float(ss.loc[69]) == 0.0
     assert float(ss.loc[70]) == approx(49_600.0)  # 1.24 × PIA
     assert float(ss.loc[75]) == approx(49_600.0)
     assert list(ss.index) == list(range(67, 76))
 
     # Claiming before retirement: payments still start at retirement age.
-    early = ret.social_security_income(40_000.0, 62, 67, 72)
+    early = social_security.social_security_income(40_000.0, 62, 67, 72)
     assert float(early.loc[67]) == approx(28_000.0)  # 0.70 × PIA from age 67
 
     # Unknown claim age (71) falls back to factor 1.0, paid from 71.
-    odd = ret.social_security_income(40_000.0, 71, 67, 73)
+    odd = social_security.social_security_income(40_000.0, 71, 67, 73)
     assert float(odd.loc[70]) == 0.0
     assert float(odd.loc[71]) == approx(40_000.0)
 
@@ -343,7 +346,7 @@ def test_ssa_roundtrip_to_pia():
         2018: 75_000.0, 2019: 75_000.0,
         2020: 200_000.0, 2021: 200_000.0, 2022: 200_000.0, 2023: 0.0,
     }
-    assert ret.annual_pia_from_earnings(ann) == approx(16_380.274285714288)
+    assert social_security.annual_pia_from_earnings(ann) == approx(16_380.274285714288)
 
 
 @pytest.mark.parametrize("text, expected", [
@@ -385,12 +388,12 @@ def test_load_vanguard_cost_basis(tmp_path):
 # Healthcare glide (ported from scripts/verify_healthcare.py — actuals pinned)
 # ════════════════════════════════════════════════════════════════════════════
 
-PART_B = ret.MEDICARE_PART_B_MONTHLY_2025 * 12.0  # 2220.0
+PART_B = healthcare.MEDICARE_PART_B_MONTHLY_2025 * 12.0  # 2220.0
 
 
 def test_healthcare_defaults_aca_to_medicare():
     """ACA bridge before 65, Medicare + OOP from 65; step DOWN at 65."""
-    hc = ret.healthcare_costs_by_age(62, 90)
+    hc = healthcare.healthcare_costs_by_age(62, 90)
     assert hc.loc[62] == approx(15_000.0)   # OOP 4000 + ACA 11000
     assert hc.loc[64] == approx(15_000.0)
     assert hc.loc[65] == approx(6_220.0)    # OOP 4000 + Part B 2220
@@ -406,7 +409,7 @@ def test_healthcare_default_ltc_runs_through_death():
     # the default ltc_annual is now 128_000 from age 85 through the horizon, so
     # the actual value is 134_220. Pinning the actual.
     """
-    hc = ret.healthcare_costs_by_age(62, 90)
+    hc = healthcare.healthcare_costs_by_age(62, 90)
     assert hc.loc[85] == approx(134_220.0)
     assert hc.loc[90] == approx(134_220.0)
 
@@ -419,24 +422,24 @@ def test_healthcare_ltc_fixed_window():
     # already carries the default 128k LTC from 85, so those assertions fail.
     # Actual values pinned here instead.
     """
-    spiked = ret.healthcare_costs_by_age(
+    spiked = healthcare.healthcare_costs_by_age(
         65, 95, ltc_annual=70_000, ltc_start_age=85, ltc_years=3)
     assert spiked.loc[84] == approx(6_220.0)
     assert spiked.loc[85] == approx(76_220.0)
     assert spiked.loc[87] == approx(76_220.0)
     assert spiked.loc[88] == approx(6_220.0)   # spike ends after 3 years
     assert spiked.loc[85] > spiked.loc[66]     # the smile upturn
-    base = ret.healthcare_costs_by_age(65, 95)
+    base = healthcare.healthcare_costs_by_age(65, 95)
     assert base.loc[85] == approx(134_220.0)   # default base DOES spike
 
 
 def test_healthcare_no_ltc_and_overrides():
     """ltc_annual=0 disables the spike; medicare_annual override flows through."""
-    hc = ret.healthcare_costs_by_age(62, 90, ltc_annual=0.0)
+    hc = healthcare.healthcare_costs_by_age(62, 90, ltc_annual=0.0)
     assert hc.loc[85] == approx(6_220.0)
     assert hc.loc[90] == approx(6_220.0)
-    hc26 = ret.healthcare_costs_by_age(
-        63, 70, medicare_annual=ret.MEDICARE_PART_B_MONTHLY_2026 * 12,
+    hc26 = healthcare.healthcare_costs_by_age(
+        63, 70, medicare_annual=healthcare.MEDICARE_PART_B_MONTHLY_2026 * 12,
         ltc_annual=0.0)
     assert hc26.loc[64] == approx(15_000.0)
     assert hc26.loc[65] == approx(6_434.8)
@@ -444,7 +447,7 @@ def test_healthcare_no_ltc_and_overrides():
 
 def test_healthcare_default_golden(goldens_dir):
     """Full default series (62→90) matches the committed golden."""
-    actual = ret.healthcare_costs_by_age(62, 90).rename_axis("age").to_frame("cost")
+    actual = healthcare.healthcare_costs_by_age(62, 90).rename_axis("age").to_frame("cost")
     golden = _read_golden(goldens_dir / "retmath_healthcare_default_62_90.csv",
                           index_col="age")
     assert_frame_equal(actual, golden, rtol=1e-9)
@@ -461,7 +464,7 @@ def test_healthcare_default_golden(goldens_dir):
 ])
 def test_rmd_start_age_boundaries(birth_year, expected):
     """SECURE 2.0 start ages at every birth-year boundary."""
-    assert ret.rmd_start_age(birth_year) == expected
+    assert rmd.rmd_start_age(birth_year) == expected
 
 
 @pytest.mark.parametrize("age, expected", [
@@ -472,18 +475,18 @@ def test_rmd_start_age_boundaries(birth_year, expected):
 ])
 def test_rmd_divisor_table_edges(age, expected):
     """Uniform Lifetime divisor lookup at/beyond the table edges."""
-    assert ret.rmd_divisor(age) == expected
+    assert rmd.rmd_divisor(age) == expected
 
 
 def test_required_min_distribution():
     """0 before start age; balance ÷ divisor at/after; fallback past the table."""
-    assert ret.required_min_distribution(1_000_000, 74, 75) == 0.0
-    assert ret.required_min_distribution(1_000_000, 75, 75) == approx(40_650.40650406504)
-    assert ret.required_min_distribution(1_000_000, 90, 75) == approx(81_967.21311475411)
+    assert rmd.required_min_distribution(1_000_000, 74, 75) == 0.0
+    assert rmd.required_min_distribution(1_000_000, 75, 75) == approx(40_650.40650406504)
+    assert rmd.required_min_distribution(1_000_000, 90, 75) == approx(81_967.21311475411)
     # Past the table top: falls back to the age-100 divisor (6.4).
-    assert ret.required_min_distribution(1_000_000, 101, 75) == approx(156_250.0)
-    assert ret.required_min_distribution(0, 80, 75) == 0.0
-    assert ret.required_min_distribution(-5, 80, 75) == 0.0
+    assert rmd.required_min_distribution(1_000_000, 101, 75) == approx(156_250.0)
+    assert rmd.required_min_distribution(0, 80, 75) == 0.0
+    assert rmd.required_min_distribution(-5, 80, 75) == 0.0
 
 
 def test_required_min_distribution_start_age_72_below_table():
@@ -493,7 +496,7 @@ def test_required_min_distribution_start_age_72_below_table():
     # the OLDEST divisor (age 100, 6.4) and a 72-year-old's RMD computes as
     # 1_000_000 / 6.4 = 156_250 — wildly overstated vs the real age-72 divisor.
     """
-    assert ret.required_min_distribution(1_000_000, 72, 72) == approx(156_250.0)
+    assert rmd.required_min_distribution(1_000_000, 72, 72) == approx(156_250.0)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -502,7 +505,7 @@ def test_required_min_distribution_start_age_72_below_table():
 
 def test_resolve_assumptions_defaults():
     """None config → DEFAULTS + birth_year None."""
-    assert ret.resolve_assumptions(None) == {
+    assert assumptions.resolve_assumptions(None) == {
         "retirement_age": 65, "death_age": 90, "claim_age": 67,
         "slow_go_age": 75, "no_go_age": 85, "real_return": 0.05,
         "withdrawal_rate": 0.04, "birth_year": None,
@@ -518,7 +521,7 @@ def test_resolve_assumptions_precedence():
                        "withdrawal_rate": 0.035,
                        "retirement_age": 99},  # ignored — Profile owns demographics
     }
-    assert ret.resolve_assumptions(cfg) == {
+    assert assumptions.resolve_assumptions(cfg) == {
         "retirement_age": 60, "death_age": 95, "claim_age": 70,
         "slow_go_age": 73, "no_go_age": 83, "real_return": 0.04,
         "withdrawal_rate": 0.035, "birth_year": 1985,
@@ -527,7 +530,7 @@ def test_resolve_assumptions_precedence():
 
 def test_resolve_assumptions_none_values_fall_back():
     """Explicit None values fall back to DEFAULTS."""
-    got = ret.resolve_assumptions(
+    got = assumptions.resolve_assumptions(
         {"retirement_age": None, "retirement": {"real_return": None}})
     assert got["retirement_age"] == 65
     assert got["real_return"] == 0.05
@@ -535,15 +538,15 @@ def test_resolve_assumptions_none_values_fall_back():
 
 def test_resolve_phase_factors():
     """Per-key per-phase merge; unknown keys seed from DEFAULT_PHASE_FACTOR."""
-    merged = ret.resolve_phase_factors(
+    merged = assumptions.resolve_phase_factors(
         {"phase_factors": {"mortgage": {"no_go": 0.0}, "new_key": {"slow_go": 0.5}}})
     assert merged["mortgage"] == {"slow_go": 0.95, "no_go": 0.0}
     assert merged["new_key"] == {"slow_go": 0.5, "no_go": 1.0}
     assert merged["groceries"] == {"slow_go": 0.90, "no_go": 0.75}  # untouched
     # No overrides → identical to the default table (but a fresh copy).
-    plain = ret.resolve_phase_factors(None)
-    assert plain == ret.PHASE_FACTORS
-    assert plain is not ret.PHASE_FACTORS
+    plain = assumptions.resolve_phase_factors(None)
+    assert plain == assumptions.PHASE_FACTORS
+    assert plain is not assumptions.PHASE_FACTORS
 
 
 @pytest.mark.parametrize("age, expected", [
@@ -553,12 +556,12 @@ def test_resolve_phase_factors():
 ])
 def test_phase_for_age_boundaries(age, expected):
     """slow_go starts AT slow_go_age; no_go starts AT no_go_age."""
-    assert ret.phase_for_age(age, 75, 85) == expected
+    assert assumptions.phase_for_age(age, 75, 85) == expected
 
 
 def test_annual_spend_by_phase_totals():
     """Drops non-spend/healthcare/investments/income keys; scales per phase."""
-    out = ret.annual_spend_by_phase(PLAN, LABELS)
+    out = assumptions.annual_spend_by_phase(PLAN, LABELS)
     assert out["go_go"]["total"] == approx(52_200.0)
     assert out["slow_go"]["total"] == approx(45_420.0)
     assert out["no_go"]["total"] == approx(38_820.0)
@@ -573,8 +576,8 @@ def test_annual_spend_by_phase_totals():
 
 def test_annual_spend_by_phase_golden(goldens_dir):
     """Per-key annual dollars by phase match the committed golden."""
-    out = ret.annual_spend_by_phase(PLAN, LABELS)
-    actual = (pd.DataFrame({p: out[p]["by_key"] for p in ret.PHASES})
+    out = assumptions.annual_spend_by_phase(PLAN, LABELS)
+    actual = (pd.DataFrame({p: out[p]["by_key"] for p in assumptions.PHASES})
               .rename_axis("csp_key").sort_index())
     golden = _read_golden(goldens_dir / "retmath_spend_by_phase.csv",
                           index_col="csp_key")
@@ -583,22 +586,22 @@ def test_annual_spend_by_phase_golden(goldens_dir):
 
 def test_annual_spend_by_phase_empty():
     """Empty plan → zero totals for all three phases."""
-    out = ret.annual_spend_by_phase(None, None)
-    assert {p: out[p]["total"] for p in ret.PHASES} == {
+    out = assumptions.annual_spend_by_phase(None, None)
+    assert {p: out[p]["total"] for p in assumptions.PHASES} == {
         "go_go": 0, "slow_go": 0, "no_go": 0}
 
 
 def test_household_expense_share():
     """Proportional to joint contributions; zero/negative clamped."""
-    assert ret.household_expense_share({"a": 3_000.0, "b": 2_000.0}, "a") == approx(0.6)
-    assert ret.household_expense_share({"a": 3_000.0}, "z") == 0.0
-    assert ret.household_expense_share({"a": 0.0, "b": 0.0}, "a") == 0.0
-    assert ret.household_expense_share({"a": -500.0, "b": 1_000.0}, "a") == 0.0
+    assert assumptions.household_expense_share({"a": 3_000.0, "b": 2_000.0}, "a") == approx(0.6)
+    assert assumptions.household_expense_share({"a": 3_000.0}, "z") == 0.0
+    assert assumptions.household_expense_share({"a": 0.0, "b": 0.0}, "a") == 0.0
+    assert assumptions.household_expense_share({"a": -500.0, "b": 1_000.0}, "a") == 0.0
 
 
 def test_merge_household_expenses():
     """Adds share × household amounts per key; transfer lines ride along."""
-    merged = ret.merge_household_expenses(
+    merged = assumptions.merge_household_expenses(
         {"groceries": 200.0, "joint_contribution": 1_500.0},
         {"mortgage": 3_000.0, "groceries": 500.0, "income": 100.0},
         0.6,
@@ -609,7 +612,7 @@ def test_merge_household_expenses():
     }
     # share 0 → individual plan unchanged (copied).
     ind = {"groceries": 200.0}
-    same = ret.merge_household_expenses(ind, {"mortgage": 3_000.0}, 0.0)
+    same = assumptions.merge_household_expenses(ind, {"mortgage": 3_000.0}, 0.0)
     assert same == {"groceries": 200.0}
     assert same is not ind
 
@@ -640,13 +643,13 @@ def test_project_retirement_first_years():
 
 def test_nest_egg_goal():
     """PV of the withdrawal stream at the retirement age; empty df → 0."""
-    assert ret.nest_egg_goal(_projection(), 0.05) == approx(924_904.2311928394)
-    assert ret.nest_egg_goal(pd.DataFrame(), 0.05) == 0.0
+    assert drawdown.nest_egg_goal(_projection(), 0.05) == approx(924_904.2311928394)
+    assert drawdown.nest_egg_goal(pd.DataFrame(), 0.05) == 0.0
 
 
 def test_retirement_summary():
     """Headline BAN numbers for the standard projection."""
-    summ = ret.retirement_summary(_projection(), 0.05)
+    summ = drawdown.retirement_summary(_projection(), 0.05)
     assert summ["nest_egg_goal"] == approx(924_904.2311928394)
     assert summ["balance_at_death"] == approx(2_097_698.39819046)
     assert summ["avg_annual_spend"] == approx(105_604.61538461539)
@@ -658,7 +661,7 @@ def test_retirement_summary():
 
 def test_retirement_summary_empty():
     """Empty projection → zeroed summary with funded_through_age None."""
-    assert ret.retirement_summary(pd.DataFrame(), 0.05) == {
+    assert drawdown.retirement_summary(pd.DataFrame(), 0.05) == {
         "nest_egg_goal": 0.0, "balance_at_death": 0.0, "avg_annual_spend": 0.0,
         "first_year_drawdown": 0.0, "peak_drawdown": 0.0,
         "funded_through_age": None, "swr_sanity_goal": 0.0,
@@ -701,31 +704,31 @@ def test_project_retirement_taxaware_shape():
 ])
 def test_allocate_withdrawals(args, expected):
     """taxable → trad → roth ordering with forced-RMD handling (promoted in Phase 4)."""
-    assert ret._allocate_withdrawals(*args) == expected
+    assert drawdown.allocate_withdrawals(*args) == expected
 
 
 def test_default_contribution_allocation():
     """Tax-advantaged-first split: trad cap, then Roth cap, then taxable."""
-    assert ret.default_contribution_allocation(50_000) == {
+    assert assumptions.default_contribution_allocation(50_000) == {
         "taxable": 19_500.0, "trad": 23_500.0, "roth": 7_000.0}
-    assert ret.default_contribution_allocation(20_000) == {
+    assert assumptions.default_contribution_allocation(20_000) == {
         "taxable": 0.0, "trad": 20_000.0, "roth": 0.0}
-    assert ret.default_contribution_allocation(25_000) == {
+    assert assumptions.default_contribution_allocation(25_000) == {
         "taxable": 0.0, "trad": 23_500.0, "roth": 1_500.0}
-    assert ret.default_contribution_allocation(-5) == {
+    assert assumptions.default_contribution_allocation(-5) == {
         "taxable": 0.0, "trad": 0.0, "roth": 0.0}
 
 
 def test_project_balances_to_retirement():
     """Per-bucket V' = V·(1+r) + contribution over `years`; years ≤ 0 passthrough."""
-    grown = ret.project_balances_to_retirement(
+    grown = assumptions.project_balances_to_retirement(
         {"taxable": 100_000.0, "trad": 200_000.0, "roth": 50_000.0},
         {"taxable": 5_000.0, "trad": 10_000.0, "roth": 7_000.0}, 10, 0.05)
     assert grown["taxable"] == approx(225_778.92535548835)
     assert grown["trad"] == approx(451_557.8507109767)
     assert grown["roth"] == approx(169_489.9790877139)
     assert grown["total"] == approx(846_826.755154179)
-    flat = ret.project_balances_to_retirement(
+    flat = assumptions.project_balances_to_retirement(
         {"taxable": 100_000.0, "trad": 200_000.0, "roth": 50_000.0},
         {"taxable": 5_000.0}, 0, 0.05)
     assert flat == {"taxable": 100_000.0, "trad": 200_000.0, "roth": 50_000.0,
@@ -742,7 +745,7 @@ def test_default_nest_egg_goal_with_income_segments():
     Internal PIA path: SEGMENTS → annual income 2015–2021 →
     annual_pia_from_earnings (7 covered years averaged over 35) → SS at claim 67.
     """
-    goal = ret.default_nest_egg_goal(
+    goal = drawdown.default_nest_egg_goal(
         {**USER_CFG, "income_segments": SEGMENTS}, PLAN, LABELS)
     assert goal == approx(899_448.7611446389)
 
@@ -754,20 +757,20 @@ def test_default_nest_egg_goal_csp_income_fallback():
     (35-year constant career, wage-base capped) — a much larger SS offset than the
     segments path, hence the smaller goal.
     """
-    goal = ret.default_nest_egg_goal(USER_CFG, PLAN, LABELS)
+    goal = drawdown.default_nest_egg_goal(USER_CFG, PLAN, LABELS)
     assert goal == approx(436_821.6413845806)
 
 
 def test_default_nest_egg_goal_no_income_no_ss():
     """Neither segments nor CSP income → PIA 0, goal is pure spend + healthcare PV."""
-    goal = ret.default_nest_egg_goal(
+    goal = drawdown.default_nest_egg_goal(
         USER_CFG, {"mortgage": 2_000.0}, {"mortgage": "fixed"})
     assert goal == approx(702_449.1432860926)
 
 
 def test_default_nest_egg_goal_all_defaults():
     """Everything None → DEFAULTS ages, zero spend, default healthcare glide only."""
-    assert ret.default_nest_egg_goal(None, None, None) == approx(350_988.1696171528)
+    assert drawdown.default_nest_egg_goal(None, None, None) == approx(350_988.1696171528)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -784,27 +787,27 @@ COST_BASIS = {
 def test_gain_fraction_all_taxable():
     """Blended (ΣMV − Σcost)/ΣMV over taxable accounts."""
     accounts = {k: "Taxable" for k in COST_BASIS}
-    assert ret.gain_fraction_from_cost_basis(COST_BASIS, accounts) == approx(
+    assert holdings.gain_fraction_from_cost_basis(COST_BASIS, accounts) == approx(
         0.5826086956521739)
 
 
 def test_gain_fraction_label_filtering():
     """TRAD_TYPES and ROTH_TYPES accounts are excluded from the blend."""
     accounts = {"1370": "Taxable", "8191": "IRA", "5555": "Roth IRA"}
-    assert ret.gain_fraction_from_cost_basis(COST_BASIS, accounts) == approx(0.374)
+    assert holdings.gain_fraction_from_cost_basis(COST_BASIS, accounts) == approx(0.374)
 
 
 def test_gain_fraction_unlabeled_defaults_taxable():
     """No investment_accounts map → every account counts as taxable."""
-    assert ret.gain_fraction_from_cost_basis(COST_BASIS, None) == approx(
+    assert holdings.gain_fraction_from_cost_basis(COST_BASIS, None) == approx(
         0.5826086956521739)
 
 
 def test_gain_fraction_none_cases():
     """All tax-deferred, or empty report → None (caller keeps the manual default)."""
-    assert ret.gain_fraction_from_cost_basis(
+    assert holdings.gain_fraction_from_cost_basis(
         COST_BASIS, {k: "IRA" for k in COST_BASIS}) is None
-    assert ret.gain_fraction_from_cost_basis({}, None) is None
+    assert holdings.gain_fraction_from_cost_basis({}, None) is None
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -822,11 +825,11 @@ def _generate_goldens() -> None:
         GOLDENS_DIR / "retmath_project_retirement.csv", float_format="%.17g")
     _taxaware().to_csv(
         GOLDENS_DIR / "retmath_taxaware.csv", float_format="%.17g")
-    (ret.healthcare_costs_by_age(62, 90).rename_axis("age").to_frame("cost")
+    (healthcare.healthcare_costs_by_age(62, 90).rename_axis("age").to_frame("cost")
      .to_csv(GOLDENS_DIR / "retmath_healthcare_default_62_90.csv",
              float_format="%.17g"))
-    out = ret.annual_spend_by_phase(PLAN, LABELS)
-    (pd.DataFrame({p: out[p]["by_key"] for p in ret.PHASES})
+    out = assumptions.annual_spend_by_phase(PLAN, LABELS)
+    (pd.DataFrame({p: out[p]["by_key"] for p in assumptions.PHASES})
      .rename_axis("csp_key").sort_index()
      .to_csv(GOLDENS_DIR / "retmath_spend_by_phase.csv", float_format="%.17g"))
     print("retmath_* goldens written to", GOLDENS_DIR)
