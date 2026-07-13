@@ -37,8 +37,6 @@ from __future__ import annotations
 
 import pandas as pd
 
-from core.services.investments import fetch_cost_basis, fetch_latest_holdings
-
 # ════════════════════════════════════════════════════════════════════════════
 # 1. Defaults  (overridable per-user via UserConfig.retirement / RetirementConfig)
 # ════════════════════════════════════════════════════════════════════════════
@@ -439,8 +437,12 @@ def balances_by_tax_bucket(uid: str, investment_accounts: dict | None) -> dict:
     (equivalent to forecast.current_portfolio_value).
 
     Not pure (reads Firestore via fetch_latest_holdings) — kept thin and at the
-    edge so the projection math stays pure and testable.
+    edge so the projection math stays pure and testable. Imported lazily so that
+    importing this module (and everything downstream of it, e.g. scenario.py)
+    never initializes firebase_admin.
     """
+    from core.services.investments import fetch_latest_holdings
+
     accounts = investment_accounts or {}
     buckets = {"taxable": 0.0, "trad": 0.0, "roth": 0.0}
     for h in fetch_latest_holdings(uid):
@@ -495,6 +497,8 @@ def taxable_gain_fraction(uid: str, investment_accounts: dict | None) -> float |
     income pane falls back to the editable TAXABLE_GAIN_FRACTION default. Kept
     thin and at the edge, mirroring balances_by_tax_bucket.
     """
+    from core.services.investments import fetch_cost_basis
+
     return gain_fraction_from_cost_basis(fetch_cost_basis(uid), investment_accounts)
 
 

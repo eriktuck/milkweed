@@ -17,8 +17,6 @@ from __future__ import annotations
 
 import pandas as pd
 
-from core.services.investments import fetch_latest_holdings
-
 # Safe withdrawal rate — fixed in v1.
 SWR = 0.04
 
@@ -36,7 +34,13 @@ RETIREMENT_SPEND_LABELS: frozenset[str] = frozenset({"fixed", "guilt-free", "sin
 # ── Data-derived inputs ────────────────────────────────────────────────────────
 
 def current_portfolio_value(uid: str) -> float:
-    """Total current portfolio value = Σ holdings.total_value for the user."""
+    """Total current portfolio value = Σ holdings.total_value for the user.
+
+    Imported lazily so that importing this module (and everything downstream,
+    e.g. scenario.py) never initializes firebase_admin.
+    """
+    from core.services.investments import fetch_latest_holdings
+
     return sum(h.get("total_value", 0.0) for h in fetch_latest_holdings(uid))
 
 

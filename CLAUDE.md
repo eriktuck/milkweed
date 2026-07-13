@@ -107,7 +107,7 @@ Beyond the Dash app, `core/models/` contains a standalone financial modelling li
 - `transactions.py` — `Transactions` wrapper around a DataFrame with filter/aggregate helpers
 - `individual.py`, `household.py`, `business.py`, `healthcare.py`, `portfolio.py`, `retirement.py` — composable entities that produce `pd.Series` projections by year
 
-These models are used in `pages/trends.py`. They are independent of Firestore and can be exercised in notebooks. (The Coast page's math is the lighter, pure pipeline in `core/services/` — `scenario.py`/`projection.py`/`forecast.py`/`retirement.py` — not this `core/models/` library.)
+These models are NOT wired to the app (the only `core/models/` import the app uses is `session.py`); they are exercised via `notebooks/` and serve as the frozen reference implementation for capabilities not yet in the live engine. They are independent of Firestore. (The Coast page's math is the lighter, pure pipeline in `core/services/` — `scenario.py`/`projection.py`/`forecast.py`/`retirement.py` — not this `core/models/` library. The Trends page uses `core/services/trends.py`.)
 
 ## Key Conventions
 
