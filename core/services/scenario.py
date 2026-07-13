@@ -38,7 +38,7 @@ from core.services.forecast import (
     default_monthly_contribution,
     required_monthly_contribution,
 )
-from core.services.glide import (
+from core.domain.glide import (
     STRATEGY_TERMINAL_EQUITY,
     accumulation_rates,
     cumulative_growth,

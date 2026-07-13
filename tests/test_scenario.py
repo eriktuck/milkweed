@@ -16,7 +16,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from core.services.glide import STRATEGY_TERMINAL_EQUITY
+from core.domain.glide import STRATEGY_TERMINAL_EQUITY
 from core.services.scenario import DEFAULT_COAST_AGE, _resolve_pia, build_scenario
 
 GOLDENS = Path(__file__).parent / "goldens"

@@ -1,6 +1,6 @@
 """Plotly figure builders for the Trends page (Concept C, Phase 4.2).
 
-Pure view layer: each builder takes a frame produced by ``core/services/trends.py``
+Pure view layer: each builder takes a frame produced by ``core/domain/trends.py``
 and returns a ``go.Figure`` in the approved theme — a **white Plotly canvas inside
 the dark card** (matching the Investments/Forecast pages). No data access here.
 
@@ -17,7 +17,7 @@ from __future__ import annotations
 import pandas as pd
 import plotly.graph_objects as go
 
-from core.services.trends import (
+from core.domain.trends import (
     OTHER_LABEL, COMBINED_LABEL, TOTAL_INCOME_LABEL, DEFAULT_FOOD_DINING_PARTS,
 )
 

@@ -1,4 +1,4 @@
-"""Characterization tests for core/services/glide.py (Coast rate-of-return glide).
+"""Characterization tests for core/domain/glide.py (Coast rate-of-return glide).
 
 Pins the CURRENT behavior of main (2026-07 characterization epoch) as the safety
 net for the core/domain/ restructuring. All literals were produced by running the
@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from core.services import glide
+from core.domain import glide
 
 approx = lambda v: pytest.approx(v, rel=1e-9)  # noqa: E731
 

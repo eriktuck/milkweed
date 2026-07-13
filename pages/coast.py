@@ -56,7 +56,7 @@ from core.services.returns import (
     build_returns_payload,
     glide_cagr_projection,
 )
-from core.services.glide import (
+from core.domain.glide import (
     DEFAULT_STRATEGY,
     STRATEGY_LABELS,
     STRATEGY_TERMINAL_EQUITY,

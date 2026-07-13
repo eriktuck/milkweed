@@ -3,7 +3,7 @@
 Single-column board of purpose-built panels (Q1 CSP shares · Q2 Food & Dining
 composite · Q3 income · Q4 guilt-free composition) plus a sticky "What changed"
 rail. See .planning/spec-trends.md (Approved Layout — Concept C). Data helpers
-live in core/services/trends.py; figure builders in core/utils/trends_charts.py;
+live in core/domain/trends.py; figure builders in core/charts/trends.py;
 this module is layout + callbacks only.
 
 Owner is the sidebar `use-case` value (a uid, matching `account_owner` in the
@@ -20,8 +20,8 @@ import pandas as pd
 from dash import Input, Output, State, callback, ctx, dcc, html
 from dash.exceptions import PreventUpdate
 
-from core.services import trends as T
-from core.utils import trends_charts as C
+from core.domain import trends as T
+from core.charts import trends as C
 
 dash.register_page(__name__, path="/trends")
 

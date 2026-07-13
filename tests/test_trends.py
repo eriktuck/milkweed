@@ -1,4 +1,4 @@
-"""Characterization tests for core/services/trends.py (Trends page data helpers).
+"""Characterization tests for core/domain/trends.py (Trends page data helpers).
 
 Pins the CURRENT behavior of the six public aggregation functions against a
 single synthetic transactions DataFrame that mirrors the shape of the
@@ -21,7 +21,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-import core.services.trends as T  # noqa: E402
+import core.domain.trends as T  # noqa: E402
 
 GOLDENS_DIR = Path(__file__).parent / "goldens"
 
