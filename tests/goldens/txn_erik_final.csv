@@ -1,0 +1,6 @@
+id,date,amount,pending,hideFromReports,plaidName,notes,category_name,account_name,account_owner,category_group,csp_from_group,csp_from_category,csp,csp_label
+t1,2025-01-02 00:00:00+00:00,-1500,False,False,PLAID RENT,,Rent,Erik Checking,erik,Housing,fixed,,fixed,fixed
+t2,2025-01-03 00:00:00+00:00,4000,False,False,PLAID PAYCHECK,january pay,Paycheck,Erik Checking,erik,Income,paycheck,,paycheck,income
+t3,2025-01-05 00:00:00+00:00,-120.5,False,False,PLAID GROCERIES,,Groceries,Erik Checking,erik,Food,,groceries,groceries,fixed
+t4,2025-01-06 00:00:00+00:00,-500,False,False,PLAID VANGUARD TRANSFER,,Vanguard Transfer,Erik Savings,erik,Transfers,,savings,savings,investments
+t6,2025-01-08 00:00:00+00:00,-45.25,False,False,PLAID RESTAURANTS,,Restaurants,Erik Checking,erik,Food,,,guilt_free,guilt-free

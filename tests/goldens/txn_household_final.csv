@@ -1,0 +1,3 @@
+id,date,amount,pending,hideFromReports,plaidName,notes,category_name,account_name,account_owner,category_group,csp_from_group,csp_from_category,csp,csp_label
+t9,2025-01-11 00:00:00+00:00,-2200,False,False,PLAID MORTGAGE,,Mortgage,Joint Checking,the andersons,Housing,fixed,,fixed,fixed
+t10,2025-01-12 00:00:00+00:00,-150,False,False,PLAID UTILITIES,,Utilities,Joint Checking,the andersons,Bills,fixed,,fixed,fixed

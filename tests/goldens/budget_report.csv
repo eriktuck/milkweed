@@ -1,0 +1,14 @@
+csp_label,amount,budget,overage,covered,remaining,proportion,order,category
+spending,4665.75,3530,1135.75,3530,-1135.75,1,12,Total Spending
+guilt-free,45.25,310,0,45.25,264.75,0.14596774193548387,11,guilt_free
+nan,,,,,,,10,Guilt Free
+0,0,200,0,0,200,0,9,vacation
+nan,,,,,,,8,Sinking
+investments,500,500,0,500,0,1,7,savings
+nan,,,,,,,6,Investments
+fixed,120.5,420,0,120.5,299.5,0.28690476190476188,5,groceries
+fixed,4000,2100,1900,2100,-1900,1,4,fixed
+nan,,,,,,,3,Fixed Costs
+income,4000,6100,0,4000,2100,0.65573770491803274,2,paycheck
+income,4000,6100,0,4000,2100,0.65573770491803274,1,Total Income
+nan,,,,,,,0,Income
