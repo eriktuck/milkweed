@@ -8,7 +8,7 @@ import pandas as pd
 from io import StringIO
 from dateutil.relativedelta import relativedelta
 
-from core.models.session import SessionData
+from core.services.session import SessionData
 from core.services.firebase import (
     fetch_all_transactions
 )

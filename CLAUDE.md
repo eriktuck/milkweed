@@ -85,7 +85,7 @@ Shared client-side state uses `dcc.Store` (mounted globally in `protected_layout
 
 ### Data / Config Model
 
-`SessionData` (in `core/models/session.py`) is the central config object. It loads per-user and per-household Firestore documents into Pydantic-validated `UserConfig` / `HouseholdConfig` models. It is serialised to/from JSON for `dcc.Store` persistence.
+`SessionData` (in `core/services/session.py`) is the central config object. It loads per-user and per-household Firestore documents into Pydantic-validated `UserConfig` / `HouseholdConfig` models (defined in `core/domain/config.py`). It is serialised to/from JSON for `dcc.Store` persistence.
 
 Firestore collections:
 - `users/{uid}` — individual config + sub-collection `budgets/{year}-{month}`

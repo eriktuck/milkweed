@@ -5,7 +5,7 @@ import asyncio
 from datetime import datetime as dt
 from flask import session
 
-from core.models.session import SessionData
+from core.services.session import SessionData
 from core.services.firebase import (
     sync_raw_transactions
 )

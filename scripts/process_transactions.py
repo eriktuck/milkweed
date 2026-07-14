@@ -14,7 +14,7 @@ from core.services.firebase import (
     get_user_config,
     update_firestore_transactions
 )
-from core.models.session import SessionData
+from core.services.session import SessionData
 from scripts.download_monarch import save_transactions_to_pkl
 
 # Local transaction file

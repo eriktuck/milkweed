@@ -3,7 +3,7 @@
 Background
 ----------
 The Retirement page (spec-retirement.md, Phase 2) adds a `retirement` map to
-each user/household config (see core/models/session.RetirementConfig). Every
+each user/household config (see core/domain/config.RetirementConfig). Every
 field is Optional and the engine (core/domain/assumptions.resolve_assumptions)
 falls back to DEFAULTS, so **read-compatibility needs no migration** — a config
 without the block behaves as if the user accepted all defaults.

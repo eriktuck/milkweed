@@ -257,7 +257,7 @@ def save_transaction_account_config(owner_docs: dict, assignments: dict):
         )
 
 
-# Profile fields persisted on users/{uid} (see core/models/session.py UserConfig
+# Profile fields persisted on users/{uid} (see core/domain/config.py UserConfig
 # and the Profile page). Only these keys are writable through save_user_profile.
 PROFILE_FIELDS = (
     "birth_date",
@@ -287,7 +287,7 @@ def save_user_profile(uid: str, payload: dict) -> None:
 
 
 # Retirement scenario knobs persisted under users/{uid}.retirement (see
-# core/models/session.py RetirementConfig). Demographics (retirement_age/
+# core/domain/config.py RetirementConfig). Demographics (retirement_age/
 # death_age/claim_age) are Profile-owned and saved via save_user_profile; these
 # are the Retirement page's own assumption knobs.
 RETIREMENT_FIELDS = (

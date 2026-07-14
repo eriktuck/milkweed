@@ -2,7 +2,7 @@ from firebase_admin import auth
 import argparse
 import pandas as pd
 
-from core.models.session import SessionData
+from core.services.session import SessionData
 from core.services.firebase import (
     sync_raw_transactions
 )

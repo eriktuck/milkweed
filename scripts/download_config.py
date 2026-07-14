@@ -1,4 +1,4 @@
-from core.models.session import SessionData
+from core.services.session import SessionData
 from pathlib import Path
 
 UID = "Ij893k3NoQSUc5aFmIwj4xKNKzP2"  # erik
