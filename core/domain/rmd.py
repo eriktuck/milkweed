@@ -4,7 +4,7 @@ Moved verbatim from core/services/retirement.py (Phase 4 of the core/
 restructuring); pinned by tests/test_retirement_math.py.
 
 FUTURE HOME: calculate_withdrawal_strategy (RMD-aware withdrawal ordering) from
-core/models/retirement.py (see docs/porting-backlog.md once created).
+core/models/retirement.py (see docs/porting-backlog.md).
 """
 
 from __future__ import annotations

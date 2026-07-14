@@ -1,3 +1,12 @@
+"""FROZEN REFERENCE (Engine A) — do not extend.
+
+Superseded by the live engine in core/domain/; kept only as the executable spec
+for capabilities not yet ported, exercised via notebooks/. Awaiting port: per-
+lot cost basis + 59.5 IRA gate -> core/domain/drawdown.py; RMD-aware withdrawal
+strategy -> core/domain/rmd.py. See docs/porting-backlog.md for the capability
+map and deletion criteria.
+"""
+
 import pandas as pd
 import numpy as np
 from .portfolio import Holding, Account, Portfolio

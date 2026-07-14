@@ -178,7 +178,7 @@ def build_scenario(
     # build_returns_payload) make the return a target-date glide: per-age accumulation
     # rates, a terminal (held) rate for drawdown + the goal discount, and an effective
     # CAGR echoed as `real_return`. Otherwise the flat rate (live override → config →
-    # DEFAULTS) drives everything, exactly as before (verify_scenario reconciles this).
+    # DEFAULTS) drives everything, exactly as before (pinned in tests/test_scenario.py).
     strategy = return_strategy if return_strategy is not None else ret_cfg.get("return_strategy")
     gp = glide_params or {}
     use_glide = (

@@ -1,3 +1,11 @@
+"""FROZEN REFERENCE (Engine A) — do not extend.
+
+Superseded by the live engine in core/domain/; kept only as the executable spec
+for capabilities not yet ported, exercised via notebooks/. Transactions wrapper
+plumbing — port functions, not the class hierarchy. See docs/porting-backlog.md
+for the capability map and deletion criteria.
+"""
+
 import json
 import datetime
 import pandas as pd

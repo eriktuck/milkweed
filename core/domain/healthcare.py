@@ -4,7 +4,7 @@ Moved verbatim from core/services/retirement.py (Phase 4 of the core/
 restructuring); pinned by tests/test_retirement_math.py.
 
 FUTURE HOME: the ACA→Medicare premium crossover model from
-core/models/healthcare.py (see docs/porting-backlog.md once created).
+core/models/healthcare.py (see docs/porting-backlog.md).
 """
 
 from __future__ import annotations

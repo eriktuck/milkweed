@@ -10,7 +10,7 @@ core/services/retirement.py (Phase 4). Pinned by tests/test_retirement_math.py.
 `resolve_pia` (Phase 5) is the single config→PIA resolution path — it replaced
 the duplicated logic in scenario's `_resolve_pia` and inside
 drawdown.default_nest_egg_goal. Later feature work: pad_earnings_to_35 (see
-docs/porting-backlog.md once created).
+docs/porting-backlog.md).
 """
 import csv
 import io

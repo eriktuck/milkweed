@@ -9,7 +9,7 @@ The two tax functions deliberately coexist: `annual_tax` is the planning-grade
 retirement calculation (2025 brackets + LTCG stacking + standard deduction);
 `calculate_married_joint_tax` (2024, ordinary only) backs the frozen
 core/models/ household models and is not edited. FUTURE HOME: FICA, CO state
-tax, per-lot LTCG (see core/models/ + docs/porting-backlog.md once created).
+tax, per-lot LTCG (see core/models/ + docs/porting-backlog.md).
 """
 
 from __future__ import annotations

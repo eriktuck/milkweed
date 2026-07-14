@@ -52,6 +52,7 @@ env-file
 !CLAUDE.md
 !docs/agents/*.md
 !docs/adr/*.md
+!docs/porting-backlog.md
 
 # Temp scripts
 tmp/
@@ -63,10 +64,11 @@ firestore-debug.log
 firestore-emulator-data/
 emulator-data/
 
-# Docs (personal analyses) — except agent config and ADRs
+# Docs (personal analyses) — except agent config, ADRs, and the porting backlog
 docs/*
 !docs/agents/
 !docs/adr/
+!docs/porting-backlog.md
 
 # Graphify
 graphify-out

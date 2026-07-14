@@ -1,3 +1,12 @@
+"""FROZEN REFERENCE (Engine A) — do not extend.
+
+Superseded by the live engine in core/domain/; kept only as the executable spec
+for capabilities not yet ported, exercised via notebooks/. Awaiting port: per-
+holding Monte Carlo -> core/domain/returns.py (imports cpi/yfinance at module
+load — never import from the app). See docs/porting-backlog.md for the
+capability map and deletion criteria.
+"""
+
 import pandas as pd
 import numpy as np
 import cpi

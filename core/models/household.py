@@ -1,3 +1,11 @@
+"""FROZEN REFERENCE (Engine A) — do not extend.
+
+Superseded by the live engine in core/domain/; kept only as the executable spec
+for capabilities not yet ported, exercised via notebooks/. Awaiting port: joint-
+contribution solver + household tax allocation -> core/domain/household.py
+(new). See docs/porting-backlog.md for the capability map and deletion criteria.
+"""
+
 import pandas as pd
 import numpy as np
 from .core import FinancialEntity

@@ -18,7 +18,7 @@ Spend is stored/returned as positive magnitudes here; **never abs() spend in
 the UI — negate (* -1) for display** (see feedback-no-abs-on-spending).
 
 FUTURE HOME: per-lot cost basis and the 59.5 IRA gate from
-core/models/retirement.py (see docs/porting-backlog.md once created).
+core/models/retirement.py (see docs/porting-backlog.md).
 """
 
 from __future__ import annotations
@@ -140,8 +140,8 @@ def default_nest_egg_goal(
     Single source of the *default* goal math. The Coast page tunes the same pipeline
     interactively (editable expense table, healthcare, SS) through
     `scenario.build_scenario`, which falls back to this default when a given input is
-    not overridden. Retained as the no-interaction baseline and for
-    `scripts/verify_scenario.py`'s reconciliation.
+    not overridden. Retained as the no-interaction baseline; the reconciliation
+    against `build_scenario`'s backward goal is pinned in `tests/test_scenario.py`.
 
     Mirrors the Coast assumption-module defaults:
       * spend — phase totals from the CSP plan (`annual_spend_by_phase`), healthcare
