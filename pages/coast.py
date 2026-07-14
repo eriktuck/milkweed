@@ -58,11 +58,8 @@ from core.services.investments import (
     fetch_latest_holdings,
     taxable_gain_fraction,
 )
-from core.services.returns import (
-    BOND_PROXY,
-    build_returns_payload,
-    glide_cagr_projection,
-)
+from core.domain.returns import BOND_PROXY, glide_cagr_projection
+from core.services.market_data import build_returns_payload
 from core.domain.glide import (
     DEFAULT_STRATEGY,
     STRATEGY_LABELS,

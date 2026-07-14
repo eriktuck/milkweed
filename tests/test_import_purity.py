@@ -1,9 +1,9 @@
-"""Importing the domain engine must never touch firebase_admin.
+"""Importing the domain engine must never touch firebase_admin, yfinance, or cpi.
 
-Pins the Phase 0 lazy-import fix and the Phase 5 dissolution: core/domain/ is
+Pins the Phase 0 lazy-import fix and the Phase 5/6 dissolutions: core/domain/ is
 pure math (no I/O imports at module scope), so `import core.domain` — whose
-façade pulls in scenario, lifetime, and everything beneath them — is
-credential-free.
+façade pulls in scenario, lifetime, and everything beneath them — plus the
+non-façade modules returns/holdings is credential- and network-free.
 
 Run in a subprocess so the check is immune to import order elsewhere in the
 test session.
@@ -18,9 +18,13 @@ REPO_ROOT = Path(__file__).parent.parent
 CHECK = (
     "import sys; "
     "import core.domain; "
+    "import core.domain.returns; "
+    "import core.domain.holdings; "
     "assert 'firebase_admin' not in sys.modules, 'firebase_admin was imported'; "
     "assert 'core.services.firebase' not in sys.modules, "
-    "'core.services.firebase was imported'"
+    "'core.services.firebase was imported'; "
+    "assert 'yfinance' not in sys.modules, 'yfinance was imported'; "
+    "assert 'cpi' not in sys.modules, 'cpi was imported'"
 )
 
 

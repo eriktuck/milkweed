@@ -1,10 +1,11 @@
-"""Historical real-return and inflation analytics for the Forecast page.
+"""Pure historical real-return analytics — market data injected, never fetched.
 
-All network/slow work (yfinance ``.history``, cpi lookups) lives here behind
-``functools.lru_cache`` so the Dash hot path never hits the network. This module
-deliberately does NOT import ``core/models/portfolio.py``, which performs
-``cpi.get()`` at import time. ``cpi`` and ``yfinance`` are imported lazily inside
-functions so importing this module stays cheap.
+Moved from core/services/returns.py (Phase 6 of the core/ restructuring). All
+market data arrives as arguments: ``inflation`` is an annual CPI-rate Series
+indexed by year, and ``returns_for`` is a ``Callable[[str], pd.Series]``
+mapping a ticker to its annual nominal total-return series. The production
+adapters (lru_cached yfinance/cpi fetchers) live in
+``core/services/market_data.py``; tests and notebooks inject fixtures.
 
 Conventions:
   - "real return" uses the precise geometric form ``(1+nominal)/(1+inflation)-1``.
@@ -13,18 +14,18 @@ Conventions:
     already baked into each year's real return) to preserve any return/inflation
     correlation.
 
-The heavy entry point is :func:`build_returns_payload`, which returns a
-JSON-serialisable dict for a ``dcc.Store``. Call it OFF the recompute hot path.
+FUTURE HOME: per-holding Monte Carlo, parametric MC + IQR bands (see
+core/models/portfolio.py + notebooks/portfolio.ipynb).
 """
 
 from __future__ import annotations
 
-import functools
+from collections.abc import Callable
 
 import numpy as np
 import pandas as pd
 
-from core.services.investments import ASSET_CLASS_MAP, MONEY_MARKET_SYMBOLS
+from core.domain.holdings import ASSET_CLASS_MAP, MONEY_MARKET_SYMBOLS
 
 # ── Constants ────────────────────────────────────────────────────────────────
 FALLBACK_TICKER = "VTSAX"
@@ -42,7 +43,6 @@ ASSET_CLASS_PROXY: dict[str, str] = {
 }
 
 CASH_REAL_RETURN = 0.0          # cash / money-market modelled at flat ~0% real
-INFLATION_START_YEAR = 1994
 N_SIMS = 1000
 RNG_SEED = 42
 
@@ -55,82 +55,25 @@ BOND_PROXY = "VBTLX"
 
 _PERCENTILES = (10, 25, 50, 75, 90)
 
-
-# ── Inflation ────────────────────────────────────────────────────────────────
-
-@functools.lru_cache(maxsize=1)
-def inflation_series() -> pd.Series:
-    """Annual US CPI inflation rate indexed by year, e.g. ``{1995: 0.028, ...}``.
-
-    Built from the ``cpi`` package: the year-over-year pct change of annual CPI
-    from ``INFLATION_START_YEAR`` to the last available year. ``cpi`` is imported
-    lazily. On any failure (offline, cpi data not downloaded), returns an empty
-    Series — callers treat empty as "inflation unavailable" and fall back to
-    nominal returns. Never calls ``cpi.update()``.
-    """
-    try:
-        import cpi  # lazy: avoids slow import-time work elsewhere
-    except Exception:
-        return pd.Series(dtype="float64")
-
-    values: dict[int, float] = {}
-    for year in range(INFLATION_START_YEAR, 2100):
-        try:
-            v = cpi.get(year)
-        except Exception:
-            break  # past the last year with data
-        if v is None:
-            break
-        values[year] = v
-
-    if len(values) < 2:
-        return pd.Series(dtype="float64")
-
-    return pd.Series(values).sort_index().pct_change().dropna()
+# A ticker → annual nominal total-return Series (indexed by calendar year).
+ReturnsFor = Callable[[str], pd.Series]
 
 
 # ── Per-ticker returns ───────────────────────────────────────────────────────
 
-@functools.lru_cache(maxsize=256)
-def nominal_annual_returns(ticker: str) -> pd.Series:
-    """Annual nominal total return for ``ticker``, indexed by calendar year.
-
-    ``yf.Ticker(t).history(period="100y", interval="1mo")["Close"]`` resampled to
-    year-end, ``pct_change`` of consecutive year-end closes. Returns an empty
-    Series for unknown tickers or on any yfinance error. Cached per ticker.
-    """
-    if not ticker:
-        return pd.Series(dtype="float64")
-    try:
-        import yfinance as yf  # lazy
-
-        # auto_adjust=True (explicit, not relying on yfinance's default): "Close" is
-        # the dividend- & split-adjusted TOTAL return. Critical for the bond leg, whose
-        # return is almost entirely coupon income — price-only would understate it badly.
-        hist = yf.Ticker(ticker).history(
-            period="100y", interval="1mo", auto_adjust=True)["Close"]
-        if hist.empty:
-            return pd.Series(dtype="float64")
-        annual = hist.resample("YE").last().pct_change().dropna()
-        annual.index = annual.index.year
-        return annual.astype("float64")
-    except Exception:
-        return pd.Series(dtype="float64")
-
-
-def real_annual_returns(ticker: str, inflation: pd.Series | None = None) -> pd.Series:
+def real_annual_returns(
+    ticker: str, inflation: pd.Series | None, returns_for: ReturnsFor
+) -> pd.Series:
     """Inflation-adjusted annual returns for ``ticker``, indexed by year.
 
-    Aligns nominal returns with ``inflation`` on the common year index and applies
-    the precise geometric form ``(1+nominal)/(1+inflation)-1``. If ``inflation`` is
-    None/empty, returns the nominal series unchanged. Empty when the ticker has no
-    usable history.
+    Aligns the nominal returns from ``returns_for(ticker)`` with ``inflation`` on
+    the common year index and applies the precise geometric form
+    ``(1+nominal)/(1+inflation)-1``. If ``inflation`` is None/empty, returns the
+    nominal series unchanged. Empty when the ticker has no usable history.
     """
-    nominal = nominal_annual_returns(ticker)
+    nominal = returns_for(ticker) if ticker else pd.Series(dtype="float64")
     if nominal.empty:
         return nominal
-    if inflation is None:
-        inflation = inflation_series()
     if inflation is None or inflation.empty:
         return nominal
     common = nominal.index.intersection(inflation.index)
@@ -166,7 +109,7 @@ def portfolio_weights(holdings: list[dict]) -> dict[str, float]:
 
 
 def _ticker_real_returns(
-    symbol: str, asset_class: str, inflation: pd.Series
+    symbol: str, asset_class: str, inflation: pd.Series, returns_for: ReturnsFor
 ) -> pd.Series:
     """Real-return series for one ticker, with cash + short-history fallbacks."""
     # Cash / money-market: flat real return over the inflation index (per decision).
@@ -174,29 +117,26 @@ def _ticker_real_returns(
         index = inflation.index if (inflation is not None and not inflation.empty) else range(2000, 2025)
         return pd.Series(CASH_REAL_RETURN, index=pd.Index(index)).astype("float64")
 
-    series = real_annual_returns(symbol, inflation)
+    series = real_annual_returns(symbol, inflation, returns_for)
     if len(series) >= MIN_YEARS_HISTORY:
         return series
 
     # Too little (or no) history → use the asset class's representative proxy.
     proxy = ASSET_CLASS_PROXY.get(asset_class, FALLBACK_TICKER)
-    return real_annual_returns(proxy, inflation)
+    return real_annual_returns(proxy, inflation, returns_for)
 
 
 def asset_class_real_returns(
-    holdings: list[dict], inflation: pd.Series | None = None
+    holdings: list[dict], inflation: pd.Series | None, returns_for: ReturnsFor
 ) -> dict[str, pd.Series]:
     """Real annual return series per asset class PRESENT in the portfolio.
 
     For each asset class, the value-weighted average of the real-return series of
     the held tickers in that class (aligned on the common year index). A ticker
-    with ``< MIN_YEARS_HISTORY`` observations or no yfinance data is replaced by
-    its ``ASSET_CLASS_PROXY``; cash/money-market by a flat ``CASH_REAL_RETURN``
-    series. Classes that resolve to no data are omitted.
+    with ``< MIN_YEARS_HISTORY`` observations or no data from ``returns_for`` is
+    replaced by its ``ASSET_CLASS_PROXY``; cash/money-market by a flat
+    ``CASH_REAL_RETURN`` series. Classes that resolve to no data are omitted.
     """
-    if inflation is None:
-        inflation = inflation_series()
-
     # Collect value per (class, symbol) so we can weight within a class.
     holdings_by_class: dict[str, list[tuple[str, float]]] = {}
     for h in holdings:
@@ -213,7 +153,7 @@ def asset_class_real_returns(
             continue
         weighted = pd.Series(dtype="float64")
         for symbol, value in members:
-            series = _ticker_real_returns(symbol, cls, inflation)
+            series = _ticker_real_returns(symbol, cls, inflation, returns_for)
             if series.empty:
                 continue
             contrib = series * (value / cls_total)
@@ -223,7 +163,9 @@ def asset_class_real_returns(
     return result
 
 
-def _effective_ticker(symbol: str, asset_class: str, inflation: pd.Series) -> str:
+def _effective_ticker(
+    symbol: str, asset_class: str, inflation: pd.Series, returns_for: ReturnsFor
+) -> str:
     """The ticker whose history actually feeds this holding's real-return series.
 
     Mirrors :func:`_ticker_real_returns`'s resolution so a label names exactly what
@@ -233,13 +175,13 @@ def _effective_ticker(symbol: str, asset_class: str, inflation: pd.Series) -> st
     """
     if symbol in MONEY_MARKET_SYMBOLS or asset_class == "Cash":
         return ASSET_CLASS_PROXY.get("Cash", FALLBACK_TICKER)
-    if len(real_annual_returns(symbol, inflation)) >= MIN_YEARS_HISTORY:
+    if len(real_annual_returns(symbol, inflation, returns_for)) >= MIN_YEARS_HISTORY:
         return symbol
     return ASSET_CLASS_PROXY.get(asset_class, FALLBACK_TICKER)
 
 
 def class_effective_tickers(
-    holdings: list[dict], inflation: pd.Series | None = None
+    holdings: list[dict], inflation: pd.Series | None, returns_for: ReturnsFor
 ) -> dict[str, list[str]]:
     """Per asset class present, the effective tickers whose histories feed its series.
 
@@ -248,15 +190,13 @@ def class_effective_tickers(
     preserving holding order — so the chart can label each per-class line with the
     real funds behind it and only name a proxy when a proxy was actually used.
     """
-    if inflation is None:
-        inflation = inflation_series()
     out: dict[str, list[str]] = {}
     for h in holdings:
         if float(h.get("total_value", 0.0) or 0.0) <= 0:
             continue
         symbol = h.get("symbol", "")
         cls = _classify(symbol)
-        eff = _effective_ticker(symbol, cls, inflation)
+        eff = _effective_ticker(symbol, cls, inflation, returns_for)
         bucket = out.setdefault(cls, [])
         if eff and eff not in bucket:
             bucket.append(eff)
@@ -522,7 +462,7 @@ def suggested_real_return(weighted_avg: pd.Series) -> float:
 
 
 def glide_return_params(
-    holdings: list[dict], inflation: pd.Series | None = None
+    holdings: list[dict], inflation: pd.Series | None, returns_for: ReturnsFor
 ) -> dict | None:
     """Two-leg (equity/fixed) parameters for the return glide path.
 
@@ -540,19 +480,16 @@ def glide_return_params(
         proxy has no usable history.
 
     Returns ``None`` for empty/zero-value holdings (no portfolio → no glide start).
-    Network-bound (yfinance/cpi) via the cached helpers — call OFF the hot path
-    (it rides inside ``build_returns_payload``).
+    Network-bound when ``returns_for`` is the live market-data adapter — call OFF
+    the hot path (it rides inside ``market_data.build_returns_payload``).
     """
-    if inflation is None:
-        inflation = inflation_series()
-
     weights = portfolio_weights(holdings)
     if not weights:
         return None
 
     w_equity0 = sum(v for cls, v in weights.items() if cls in EQUITY_CLASSES)
 
-    class_series = asset_class_real_returns(holdings, inflation)
+    class_series = asset_class_real_returns(holdings, inflation, returns_for)
     equity_series = weighted_average_real_returns(
         {cls: s for cls, s in class_series.items() if cls in EQUITY_CLASSES},
         {cls: weights.get(cls, 0.0) for cls in EQUITY_CLASSES},
@@ -560,13 +497,14 @@ def glide_return_params(
     if len(equity_series):
         r_equity = suggested_real_return(equity_series)
     else:
-        r_equity = suggested_real_return(real_annual_returns(FALLBACK_TICKER, inflation))
+        r_equity = suggested_real_return(
+            real_annual_returns(FALLBACK_TICKER, inflation, returns_for))
 
     # Fixed leg: the user's actual bonds when held, the BOND_PROXY otherwise (the
     # glide de-risks into bonds even for someone holding none today).
     bond_series = class_series.get("Bonds")
     if bond_series is None or not len(bond_series):
-        bond_series = real_annual_returns(BOND_PROXY, inflation)
+        bond_series = real_annual_returns(BOND_PROXY, inflation, returns_for)
     r_fixed = suggested_real_return(bond_series) if len(bond_series) else CASH_REAL_RETURN
 
     return {
@@ -577,7 +515,7 @@ def glide_return_params(
 
 
 def glide_return_pools(
-    holdings: list[dict], inflation: pd.Series | None = None
+    holdings: list[dict], inflation: pd.Series | None, returns_for: ReturnsFor
 ) -> dict:
     """Aligned (equity, fixed) historical real-return arrays for the glide-aware fan.
 
@@ -591,21 +529,18 @@ def glide_return_pools(
     fixed when a leg has no usable history. Returns ``{"equity_pool", "fixed_pool",
     "years"}`` (empty lists when nothing aligns).
     """
-    if inflation is None:
-        inflation = inflation_series()
-
-    class_series = asset_class_real_returns(holdings, inflation)
+    class_series = asset_class_real_returns(holdings, inflation, returns_for)
     weights = portfolio_weights(holdings)
     equity = weighted_average_real_returns(
         {cls: s for cls, s in class_series.items() if cls in EQUITY_CLASSES},
         {cls: weights.get(cls, 0.0) for cls in EQUITY_CLASSES},
     )
     if not len(equity):
-        equity = real_annual_returns(FALLBACK_TICKER, inflation)
+        equity = real_annual_returns(FALLBACK_TICKER, inflation, returns_for)
     # Fixed leg: actual bonds when held, BOND_PROXY otherwise, flat cash as last resort.
     fixed = class_series.get("Bonds")
     if fixed is None or not len(fixed):
-        fixed = real_annual_returns(BOND_PROXY, inflation)
+        fixed = real_annual_returns(BOND_PROXY, inflation, returns_for)
     if not len(fixed):
         fixed = pd.Series(CASH_REAL_RETURN, index=equity.index, dtype="float64")
 
@@ -617,74 +552,4 @@ def glide_return_pools(
         "equity_pool": [float(x) for x in equity.loc[common]],
         "fixed_pool": [float(x) for x in fixed.loc[common]],
         "years": [int(y) for y in common],
-    }
-
-
-# ── Orchestration ────────────────────────────────────────────────────────────
-
-def build_returns_payload(holdings: list[dict]) -> dict:
-    """Compute everything the Forecast 'returns' section needs, in one shot.
-
-    This is the only network-bound entry point (cached yfinance + cpi reads); call
-    it OFF the recompute hot path. Returns a JSON-serialisable dict for a
-    ``dcc.Store``. The MCMC fan itself is NOT computed here (it depends on the
-    user's start value/contributions/horizon) — only ``real_return_pool`` is
-    provided so the fan callback can run the fast numpy bootstrap.
-    """
-    if not holdings:
-        return {
-            "ok": False,
-            "message": "Upload holdings on the Investments page to see return analytics.",
-            "inflation": {},
-            "inflation_available": False,
-            "class_real_returns": {},
-            "weighted_avg": {},
-            "real_return_pool": [],
-            "suggested_real_return_pct": 0.0,
-            "n_years": 0,
-            "glide": None,
-            "equity_pool": [],
-            "fixed_pool": [],
-            "years": [],
-        }
-
-    inflation = inflation_series()
-    inflation_available = not inflation.empty
-
-    class_series = asset_class_real_returns(holdings, inflation)
-    weights = portfolio_weights(holdings)
-    weighted_avg = weighted_average_real_returns(class_series, weights)
-
-    if weighted_avg.empty and not class_series:
-        return {
-            "ok": False,
-            "message": "No historical return data available for these holdings.",
-            "inflation": {int(k): float(v) for k, v in inflation.items()},
-            "inflation_available": inflation_available,
-            "class_real_returns": {},
-            "weighted_avg": {},
-            "real_return_pool": [],
-            "suggested_real_return_pct": 0.0,
-            "n_years": 0,
-            "glide": None,
-            "equity_pool": [],
-            "fixed_pool": [],
-            "years": [],
-        }
-
-    return {
-        "ok": True,
-        "message": "" if inflation_available else "Inflation data unavailable — returns shown are nominal.",
-        "inflation": {int(k): float(v) for k, v in inflation.items()},
-        "inflation_available": inflation_available,
-        "class_real_returns": {
-            cls: {int(y): float(r) for y, r in s.items()} for cls, s in class_series.items()
-        },
-        "class_labels": class_effective_tickers(holdings, inflation),
-        "weighted_avg": {int(y): float(r) for y, r in weighted_avg.items()},
-        "real_return_pool": [float(x) for x in weighted_avg.to_numpy()],
-        "suggested_real_return_pct": round(suggested_real_return(weighted_avg) * 100.0, 2),
-        "n_years": int(len(weighted_avg)),
-        "glide": glide_return_params(holdings, inflation),
-        **glide_return_pools(holdings, inflation),  # equity_pool, fixed_pool, years
     }

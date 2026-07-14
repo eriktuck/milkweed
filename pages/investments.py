@@ -8,8 +8,8 @@ import plotly.graph_objects as go
 from dash import dcc, html, callback, Input, Output
 from flask import session
 
+from core.domain.holdings import ASSET_CLASS_MAP
 from core.services.investments import (
-    ASSET_CLASS_MAP,
     compute_ytd_contributions,
     fetch_investment_transactions,
     fetch_latest_holdings,

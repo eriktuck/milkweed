@@ -11,11 +11,11 @@ Run from the repo root:
 
 from pathlib import Path
 
-from core.services.investments import (
+from core.domain.holdings import (
     detect_vanguard_csv_type,
+    gain_fraction_from_cost_basis,
     parse_vanguard_cost_basis_csv,
 )
-from core.domain.holdings import gain_fraction_from_cost_basis
 
 DATA = Path(__file__).resolve().parent.parent / "data"
 

@@ -1,16 +1,14 @@
-"""Characterization tests for the deterministic parts of core/services/returns.py.
+"""Characterization tests for the deterministic parts of core/domain/returns.py.
 
-No network, no Firebase: `core.services.returns` imports two constants from
-`core.services.investments`, which initializes firebase_admin at import time —
-so a stub module carrying VERBATIM copies of those constants (from current
-main) is installed in sys.modules before the import. The yfinance seam
-(`nominal_annual_returns`) is monkeypatched with synthetic per-ticker series
-for the glide helpers, so everything downstream runs on injected data.
+No network, no Firebase: `core.domain.returns` is pure — market data arrives as
+arguments (`inflation: pd.Series`, `returns_for: Callable`), so the tests pass
+synthetic per-ticker series through the seam directly. (Before Phase 6 this
+file stubbed `core.services.investments` and monkeypatched the module-level
+yfinance fetcher; the injection seam replaced both.)
 
-Never exercised here (network-bound by design): `inflation_series`,
-the real `nominal_annual_returns`, `build_returns_payload`,
-`class_effective_tickers` (unpatched), and `asset_class_real_returns` /
-`real_annual_returns` are only reached through the patched seam.
+Never exercised here (network-bound by design, now in
+core/services/market_data.py): `inflation_series`, the real
+`nominal_annual_returns`, and `build_returns_payload`.
 
 Bootstrap Monte Carlo functions are pinned on INVARIANTS only (shape, N_SIMS,
 seeded determinism, percentile monotonicity) — never exact golden paths.
@@ -20,31 +18,13 @@ via ``uv run python -m tests.test_returns``. A refactor may NEVER regenerate
 them; tests only read.
 """
 
-import sys
-import types
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
 
-# ── Stub core.services.investments (it inits firebase_admin at import) ──────────
-# Constants copied VERBATIM from core/services/investments.py on current main so
-# classification behavior matches production exactly.
-if "core.services.investments" not in sys.modules:
-    _stub = types.ModuleType("core.services.investments")
-    _stub.ASSET_CLASS_MAP = {
-        "VTSAX": "US Equity", "VEXAX": "US Equity", "VTI": "US Equity",
-        "VFTAX": "US Equity", "VASVX": "US Equity", "VHCAX": "US Equity",
-        "VHCOX": "US Equity", "ICLN": "US Equity",
-        "VEU": "Intl Equity", "VSS": "Intl Equity",
-        "VBTLX": "Bonds", "VBIRX": "Bonds",
-        "VMFXX": "Cash", "VMRXX": "Cash",
-    }
-    _stub.MONEY_MARKET_SYMBOLS = frozenset({"VMFXX", "VMRXX"})
-    sys.modules["core.services.investments"] = _stub
-
-import core.services.returns as R  # noqa: E402
+import core.domain.returns as R
 
 GOLDENS_DIR = Path(__file__).parent / "goldens"
 
@@ -83,12 +63,9 @@ FX_POOL = [0.03, 0.01, 0.02, 0.00, 0.04]
 BOOT_POOL = [0.08, -0.12, 0.15, 0.03, -0.05, 0.22, 0.07, -0.18, 0.11, 0.04, 0.09, -0.02]
 
 
-@pytest.fixture
-def patched_market(monkeypatch):
-    """Replace the yfinance seam with the synthetic per-ticker nominal series."""
-    def fake_nominal(ticker: str) -> pd.Series:
-        return FAKE_NOMINAL.get(ticker, pd.Series(dtype="float64")).copy()
-    monkeypatch.setattr(R, "nominal_annual_returns", fake_nominal)
+def fake_nominal(ticker: str) -> pd.Series:
+    """The injected `returns_for` seam: synthetic per-ticker nominal series."""
+    return FAKE_NOMINAL.get(ticker, pd.Series(dtype="float64")).copy()
 
 
 # ── portfolio_weights ────────────────────────────────────────────────────────────
@@ -189,24 +166,24 @@ def test_percentile_bands_empty():
 
 # ── glide_return_params / glide_return_pools (injected market data) ─────────────
 
-def test_glide_return_params_literals(patched_market):
+def test_glide_return_params_literals():
     """Two-leg glide params from the synthetic market: equity weight + leg CAGRs."""
-    got = R.glide_return_params(HOLDINGS, FAKE_INFLATION)
+    got = R.glide_return_params(HOLDINGS, FAKE_INFLATION, fake_nominal)
     # US 0.6 + Intl 0.2 + Other 0.05 (ZZZTOP has short history → VTSAX proxy)
     assert got["w_equity0"] == pytest.approx(0.85, rel=1e-9)
     assert got["r_equity"] == pytest.approx(0.05390076134518762, rel=1e-9)
     assert got["r_fixed"] == pytest.approx(0.009801991277713862, rel=1e-9)
 
 
-def test_glide_return_params_none_without_portfolio(patched_market):
-    assert R.glide_return_params([], FAKE_INFLATION) is None
+def test_glide_return_params_none_without_portfolio():
+    assert R.glide_return_params([], FAKE_INFLATION, fake_nominal) is None
     assert R.glide_return_params([{"symbol": "VTSAX", "total_value": 0.0}],
-                                 FAKE_INFLATION) is None
+                                 FAKE_INFLATION, fake_nominal) is None
 
 
-def test_glide_return_pools_golden(patched_market):
+def test_glide_return_pools_golden():
     """Aligned equity/fixed real-return pools on the common (sorted) year index."""
-    pools = R.glide_return_pools(HOLDINGS, FAKE_INFLATION)
+    pools = R.glide_return_pools(HOLDINGS, FAKE_INFLATION, fake_nominal)
     # Equity leg spans 1998–2023 (VTSAX), bonds 2002–2023 → 22 common years.
     assert pools["years"] == list(range(2002, 2024))
     actual = pd.DataFrame(
@@ -390,13 +367,7 @@ def _generate_goldens() -> None:
                                 float_format="%.17g", index_label="year")
     print("wrote returns_weighted_avg.csv")
 
-    original = R.nominal_annual_returns
-    R.nominal_annual_returns = (
-        lambda t: FAKE_NOMINAL.get(t, pd.Series(dtype="float64")).copy())
-    try:
-        pools = R.glide_return_pools(HOLDINGS, FAKE_INFLATION)
-    finally:
-        R.nominal_annual_returns = original
+    pools = R.glide_return_pools(HOLDINGS, FAKE_INFLATION, fake_nominal)
     frame = pd.DataFrame(
         {"equity_pool": pools["equity_pool"], "fixed_pool": pools["fixed_pool"]},
         index=pd.Index(pools["years"], name="year"))

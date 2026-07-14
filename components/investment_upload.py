@@ -5,8 +5,8 @@ import dash_bootstrap_components as dbc
 from dash import dcc, html, callback, Input, Output, State
 from flask import session
 
+from core.domain.holdings import detect_vanguard_csv_type
 from core.services.investments import (
-    detect_vanguard_csv_type,
     process_and_upload_cost_basis_csv,
     process_and_upload_vanguard_csv,
 )

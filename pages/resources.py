@@ -19,8 +19,9 @@ import plotly.graph_objects as go
 from dash import Input, Output, State, callback, dcc, html
 from flask import session
 
+from core.domain.returns import bootstrap_projection
 from core.services.investments import fetch_latest_holdings
-from core.services.returns import bootstrap_projection, build_returns_payload
+from core.services.market_data import build_returns_payload
 
 dash.register_page(__name__, path="/resources")
 
