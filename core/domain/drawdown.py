@@ -3,8 +3,9 @@
 Moved verbatim from core/services/retirement.py (Phase 4 of the core/
 restructuring); pinned by tests/test_retirement_math.py. The former private
 helpers `_as_age_lookup` / `_allocate_withdrawals` are promoted public here
-(`as_age_lookup`, `allocate_withdrawals`) — they were already reached into by
-core/services/projection.py.
+(`as_age_lookup`, `allocate_withdrawals`); core/domain/lifetime.py builds its
+unified engine on them (the import edge points lifetime → drawdown, keeping
+the graph a DAG).
 
 The tax math is planning-grade and retirement-scoped (2025 MFJ constants in
 core/domain/taxes.py) rather than reusing taxes.calculate_married_joint_tax
@@ -33,12 +34,7 @@ from core.domain.assumptions import (
     resolve_phase_factors,
 )
 from core.domain.healthcare import healthcare_costs_by_age
-from core.domain.social_security import (
-    annual_pia_from_earnings,
-    estimate_annual_pia_from_income,
-    segments_to_annual_income,
-    social_security_income,
-)
+from core.domain.social_security import resolve_pia, social_security_income
 
 # Planning default: share of a taxable-account withdrawal that is realized
 # long-term gain (taxed at LTCG); the rest is return of basis (tax-free). We do
@@ -175,16 +171,7 @@ def default_nest_egg_goal(
     hc = healthcare_costs_by_age(retirement_age, death_age)
 
     # Social Security: prefer Profile earnings history; else a CSP-income estimate.
-    segments = (user_cfg or {}).get("income_segments")
-    if segments:
-        pia = annual_pia_from_earnings(segments_to_annual_income(segments))
-    else:
-        labels = csp_labels or {}
-        annual_income = 12.0 * sum(
-            float(amt) for key, amt in (active_plan or {}).items()
-            if labels.get(key) == "income"
-        )
-        pia = estimate_annual_pia_from_income(annual_income) if annual_income else 0.0
+    pia = resolve_pia(user_cfg, active_plan, csp_labels)
     ss = social_security_income(pia, claim_age, retirement_age, death_age)
 
     stream = project_retirement(0.0, retirement_age, death_age, spend,
@@ -241,7 +228,9 @@ def retirement_summary(
     }
 
 
-# ── Tax-aware drawdown engine (v1.5) ─────────────────────────────────────────────
+# ── Tax-aware withdrawal ordering (v1.5) ─────────────────────────────────────────
+# The full tax-aware engine (simulate_lifetime + project_retirement_taxaware)
+# lives in core/domain/lifetime.py; this is the per-year allocation rule it uses.
 
 def allocate_withdrawals(target, taxable, trad, roth, rmd):
     """Fund `target` after RMD, in order taxable → trad → roth.
@@ -265,60 +254,3 @@ def allocate_withdrawals(target, taxable, trad, roth, rmd):
     remaining -= w_roth
 
     return w_taxable, w_trad, w_roth, excess_rmd, remaining
-
-
-def project_retirement_taxaware(
-    balances: dict,
-    retirement_age: int,
-    death_age: int,
-    spend_by_phase: dict[str, float],
-    slow_go_age: int,
-    no_go_age: int,
-    real_return: float,
-    ss_by_age: pd.Series | dict | None = None,
-    healthcare_by_age: pd.Series | dict | None = None,
-    rmd_start: int = 75,
-    taxable_gain_fraction: float = TAXABLE_GAIN_FRACTION,
-) -> pd.DataFrame:
-    """Year-by-year tax-aware drawdown across taxable / trad / roth buckets.
-
-    Each year: cover the net living need (phase spend + healthcare − Social
-    Security) with after-tax cash, withdrawing taxable → trad → roth, RMDs forced
-    from trad at `rmd_start`. Taxes (ordinary on trad, LTCG on the taxable gain
-    fraction, Roth tax-free) are solved with a short fixed-point loop since the
-    draw must cover spending *and* the tax it generates. Surviving balances grow
-    at `real_return`.
-
-    Returns a DataFrame indexed by `age` with columns:
-        total, taxable, trad, roth, spend, healthcare, income (SS), rmd,
-        withdrawal, w_taxable, w_trad, w_roth, ordinary_income, ltcg_gain,
-        tax, net_spend, phase
-
-    `total` is the portfolio entering each age-year (before that year's draw).
-    All flows are positive magnitudes; the UI negates draws for display.
-
-    Thin wrapper over the shared `simulate_lifetime` engine (retirement slice):
-    with no accumulation window (current_age = coast_age = retirement_age) the
-    engine runs only the tax-aware drawdown, byte-identical to the original loop.
-    The engine's `spend_phase` column is the `phase` returned here.
-    (`simulate_lifetime` lives in core/services/projection.py until Phase 5
-    moves it to core/domain/lifetime.py — imported lazily so importing this
-    module never pulls in core.services.)
-    """
-    from core.services.projection import simulate_lifetime
-
-    df = simulate_lifetime(
-        buckets=balances, allocation={},
-        current_age=retirement_age, coast_age=retirement_age,
-        retirement_age=retirement_age, death_age=death_age,
-        spend_by_phase=spend_by_phase, slow_go_age=slow_go_age, no_go_age=no_go_age,
-        r_accum=real_return, r_retire=real_return,
-        ss_by_age=ss_by_age, healthcare_by_age=healthcare_by_age,
-        rmd_start=rmd_start, gain_fraction=taxable_gain_fraction,
-    )
-    out = df.rename(columns={"spend_phase": "phase"})
-    return out[[
-        "total", "taxable", "trad", "roth", "spend", "healthcare", "income",
-        "rmd", "withdrawal", "w_taxable", "w_trad", "w_roth", "ordinary_income",
-        "ltcg_gain", "tax", "net_spend", "phase",
-    ]]

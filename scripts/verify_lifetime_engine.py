@@ -1,4 +1,4 @@
-"""Verify the unified lifetime engine (core/services/projection.simulate_lifetime).
+"""Verify the unified lifetime engine (core/domain/lifetime.simulate_lifetime).
 
 Pure check — no Firestore. Gates the Step-1 extraction (.planning/SPEC-rationalize-pages.md):
 
@@ -7,19 +7,22 @@ Pure check — no Firestore. Gates the Step-1 extraction (.planning/SPEC-rationa
      drawdown is byte-identical (same columns, same numbers).
   2. `project_balances_to_retirement` (also a wrapper) reproduces its golden
      at-retirement balances.
-  3. The engine's **accumulation aggregate reconciles with Forecast's
-     `project_portfolio`** — the cross-page invariant that lets Forecast consume
-     the shared engine without moving any dashboard number.
+  3. The engine's **accumulation aggregate reconciles with the pinned
+     project_portfolio total** (the function was deleted in Phase 5; its value
+     lives on as the GOLDEN_PROJ constant) — the cross-page invariant that let
+     Forecast consume the shared engine without moving any dashboard number.
   4. Bucket split is additive (sum of buckets == single-bucket aggregate).
 
 Run from the repo root:
     python -m scripts.verify_lifetime_engine
 """
 
-from core.services.forecast import forecast_summary, project_portfolio
-from core.services.projection import simulate_lifetime
-from core.domain.assumptions import project_balances_to_retirement
-from core.domain.drawdown import default_nest_egg_goal, project_retirement_taxaware
+from core.domain.drawdown import default_nest_egg_goal
+from core.domain.lifetime import (
+    project_balances_to_retirement,
+    project_retirement_taxaware,
+    simulate_lifetime,
+)
 
 # Column contract of the legacy tax-aware drawdown (order matters).
 GOLDEN_COLS = [
@@ -87,16 +90,13 @@ def check_reconciles_with_forecast() -> None:
     )
     engine_total = float(df.loc[retirement_age, "total"])
 
-    fdf = project_portfolio(
-        start_value=start, current_age=current_age, coast_age=retirement_age,
-        retirement_age=retirement_age, horizon_age=retirement_age,
-        annual_contribution=annual_contribution, real_return=r,
-    )
-    forecast_total = float(fdf.loc[retirement_age, "total"])
+    # The total the deleted forecast.project_portfolio produced for these
+    # inputs, captured before Phase 5 removed it.
+    forecast_total = GOLDEN_PROJ["total"]
 
     diff = abs(engine_total - forecast_total)
-    assert diff < 1.0, f"engine {engine_total:,.2f} != forecast {forecast_total:,.2f}"
-    print(f"  reconciles with Forecast ✓  {engine_total:,.0f} at age {retirement_age} (Δ {diff:.4f})")
+    assert diff < TOL, f"engine {engine_total:,.2f} != pinned forecast {forecast_total:,.2f}"
+    print(f"  reconciles with pinned Forecast total ✓  {engine_total:,.0f} at age {retirement_age} (Δ {diff:.4f})")
 
 
 def check_bucket_additivity() -> None:
@@ -115,23 +115,6 @@ def check_bucket_additivity() -> None:
     )
     assert abs(float(single.loc[65, "total"]) - float(split.loc[65, "total"])) < 1e-6
     print("  bucket split is additive ✓")
-
-
-def check_forecast_summary_consumes_goal() -> None:
-    # forecast_summary now takes the goal directly (no annual_spend/4%).
-    start, current_age, coast_age, retirement_age, r = 250_000.0, 40, 50, 65, 0.05
-    goal = 2_000_000.0
-    df = project_portfolio(
-        start_value=start, current_age=current_age, coast_age=coast_age,
-        retirement_age=retirement_age, horizon_age=retirement_age,
-        annual_contribution=30_000.0, real_return=r,
-    )
-    s = forecast_summary(df, goal, r, start, current_age, coast_age, retirement_age)
-    assert abs(s["retirement_goal"] - goal) < TOL, s["retirement_goal"]
-    expected_coast = goal / ((1 + r) ** (retirement_age - coast_age))
-    assert abs(s["coast_target"] - expected_coast) < TOL, s["coast_target"]
-    assert "sustainable_income" not in s, "swr-derived field should be gone"
-    print(f"  forecast_summary consumes goal ✓  coast target {s['coast_target']:,.0f}")
 
 
 def check_default_goal_from_config() -> None:
@@ -154,7 +137,6 @@ def main() -> None:
     check_balances_golden()
     check_reconciles_with_forecast()
     check_bucket_additivity()
-    check_forecast_summary_consumes_goal()
     check_default_goal_from_config()
     print("\nLifetime engine + goal handshake verified ✓")
 

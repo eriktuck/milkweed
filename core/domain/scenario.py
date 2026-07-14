@@ -4,27 +4,23 @@ The Coast page replaces the split Forecast (accumulation) + Retirement (drawdown
 pages with one screen (.planning/SPEC-scenario-planning.md). This module is the
 single entry point its callback calls: given a user's config + the two live inputs
 (milestone ages and the monthly contribution), `build_scenario` composes the
-existing pure helpers into one result object carrying the full lifetime walk and
-every headline number (the four BANs).
+domain helpers into one result object carrying the full lifetime walk and every
+headline number (the four BANs). Moved from core/services/scenario.py in Phase 5
+of the core/ restructuring; pinned by tests/test_scenario.py.
 
 It does **not** introduce new math. It orchestrates:
   * backward-from-spending goal — `drawdown.project_retirement` → `nest_egg_goal`
     (the same pipeline as `drawdown.default_nest_egg_goal`, but driven by the
     *live* slider ages and tuned spend/healthcare/SS instead of only config);
-  * forward lifetime walk — `projection.simulate_lifetime` (accumulation → coast →
-    tax-aware drawdown), whose accumulation aggregate reconciles with the old
-    Forecast `project_portfolio` (see scripts/verify_lifetime_engine.py);
-  * the CoastFIRE quantities — `coast_target = goal / (1+r)^(ret−coast)` and the
-    closed-form `forecast.required_monthly_contribution`, identical to the old
-    `forecast.forecast_summary`.
-
-Because every number is produced by a helper the legacy pages already used,
-`build_scenario` reconciles with both pages by construction — gated by
-scripts/verify_scenario.py.
+  * forward lifetime walk — `lifetime.simulate_lifetime` (accumulation → coast →
+    tax-aware drawdown);
+  * the CoastFIRE quantities — `accumulation.coast_target` and the closed-form
+    `accumulation.required_monthly_contribution` (glide-path variants in
+    `glide`).
 
 Pure: callers pass deserialized config dicts and the current `buckets` (read from
-the holdings snapshot at the page edge, mirroring how the old pages called
-`investments.balances_by_tax_bucket`). No Firestore or network here.
+the holdings snapshot at the page edge via `investments.balances_by_tax_bucket`).
+No Firestore or network here.
 """
 
 from __future__ import annotations
@@ -34,10 +30,7 @@ from datetime import date
 
 import pandas as pd
 
-from core.services.forecast import (
-    default_monthly_contribution,
-    required_monthly_contribution,
-)
+from core.domain import accumulation
 from core.domain.glide import (
     STRATEGY_TERMINAL_EQUITY,
     accumulation_rates,
@@ -47,12 +40,13 @@ from core.domain.glide import (
     required_monthly_glide,
     retirement_rate,
 )
-from core.services.projection import simulate_lifetime
+from core.domain.lifetime import simulate_lifetime
 from core.domain.assumptions import (
     DEFAULTS,
     PHASES,
     annual_spend_by_phase,
     default_contribution_allocation,
+    default_monthly_contribution,
     resolve_assumptions,
     resolve_phase_factors,
 )
@@ -63,11 +57,7 @@ from core.domain.drawdown import (
 )
 from core.domain.healthcare import healthcare_costs_by_age
 from core.domain.rmd import rmd_start_age
-from core.domain.social_security import (
-    annual_pia_from_earnings,
-    estimate_annual_pia_from_income,
-    social_security_income,
-)
+from core.domain.social_security import resolve_pia, social_security_income
 
 # Coast age lives on the Profile/UserConfig top-level (default 50); resolve_assumptions
 # deliberately omits it (it is an accumulation-only milestone), so we read it directly.
@@ -126,33 +116,6 @@ class Scenario:
 
     def __post_init__(self) -> None:
         self.on_track = self.projected_at_coast >= self.coast_target
-
-
-def _resolve_pia(
-    user_cfg: dict | None,
-    active_plan: dict | None,
-    csp_labels: dict | None,
-) -> float:
-    """Annual Social Security benefit at FRA, preferring real earnings history.
-
-    Mirrors `drawdown.default_nest_egg_goal`: use the Profile income segments via
-    `annual_pia_from_earnings` when present, else estimate from the CSP `income`
-    line, else 0. Kept here so the slider-driven goal uses the identical SS basis
-    the config-default goal does.
-    """
-    segments = (user_cfg or {}).get("income_segments")
-    if segments:
-        from core.domain.social_security import segments_to_annual_income
-
-        return annual_pia_from_earnings(segments_to_annual_income(segments))
-
-    labels = csp_labels or {}
-    annual_income = 12.0 * sum(
-        float(amt)
-        for key, amt in (active_plan or {}).items()
-        if labels.get(key) == "income"
-    )
-    return estimate_annual_pia_from_income(annual_income) if annual_income else 0.0
 
 
 def build_scenario(
@@ -267,7 +230,7 @@ def build_scenario(
 
     if pia_annual is None:
         pia_annual = ret_cfg.get("pia_annual")
-    pia = pia_annual if pia_annual is not None else _resolve_pia(cfg, active_plan, csp_labels)
+    pia = pia_annual if pia_annual is not None else resolve_pia(cfg, active_plan, csp_labels)
     ss = social_security_income(pia, claim_age, retirement_age, death_age)
 
     if gain_fraction is None:
@@ -295,12 +258,13 @@ def build_scenario(
         rmd_start=rmd_start, gain_fraction=gain_fraction,
     )
 
-    # ── CoastFIRE quantities (flat rate: identical to forecast.forecast_summary;
-    # glide: the cumulative glide growth replaces the constant-rate closed forms) ──
-    years_coast_to_ret = max(retirement_age - coast_age, 0)
-    coast_growth = (cumulative_growth(accum_rates, coast_age, retirement_age)
-                    if use_glide else (1 + r_retire) ** years_coast_to_ret)
-    coast_target = goal / coast_growth if coast_growth else goal
+    # ── CoastFIRE quantities (flat rate: accumulation.coast_target; glide: the
+    # cumulative glide growth replaces the constant-rate closed forms) ──
+    if use_glide:
+        coast_growth = cumulative_growth(accum_rates, coast_age, retirement_age)
+        target = goal / coast_growth if coast_growth else goal
+    else:
+        target = accumulation.coast_target(goal, r_retire, coast_age, retirement_age)
 
     def _at(age: int) -> float:
         return (float(lifetime.loc[age, "total"]) if age in lifetime.index
@@ -311,9 +275,9 @@ def build_scenario(
     start_value = float(buckets.get("total", sum(
         float(buckets.get(b, 0.0)) for b in ("taxable", "trad", "roth"))))
     req_monthly = (required_monthly_glide(start_value, current_age, coast_age,
-                                          coast_target, accum_rates) if use_glide
-                   else required_monthly_contribution(start_value, current_age,
-                                                      coast_age, coast_target, r_retire))
+                                          target, accum_rates) if use_glide
+                   else accumulation.required_monthly_contribution(
+                       start_value, current_age, coast_age, target, r_retire))
 
     return Scenario(
         current_age=current_age, coast_age=coast_age, retirement_age=retirement_age,
@@ -323,9 +287,9 @@ def build_scenario(
         allocation=dict(alloc), buckets=dict(buckets), start_value=start_value,
         spend_by_phase=spend, pia_annual=float(pia), ss_by_age=ss, healthcare_by_age=hc,
         lifetime=lifetime,
-        nest_egg_goal=goal, coast_target=coast_target,
+        nest_egg_goal=goal, coast_target=target,
         projected_at_coast=projected_at_coast,
-        coast_surplus=projected_at_coast - coast_target,
+        coast_surplus=projected_at_coast - target,
         required_monthly=req_monthly,
         projected_at_retirement=projected_at_retirement,
         return_strategy=strategy,

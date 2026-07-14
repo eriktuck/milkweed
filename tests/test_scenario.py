@@ -1,7 +1,7 @@
-"""Characterization tests for core.services.scenario.build_scenario.
+"""Characterization tests for core.domain.scenario.build_scenario.
 
-Pins the CURRENT behavior of the Coast page's façade (and its `_resolve_pia`
-helper) on current main, ahead of the core/domain/ restructuring. All expected
+Pins the CURRENT behavior of the Coast page's façade (and the shared
+`social_security.resolve_pia` helper) on current main. All expected
 literals were observed by running the code as-is; nothing here asserts intended
 behavior. Fixtures are lifted from scripts/verify_scenario.py (whose CASES are
 ported into pytest below). Pure — no Firestore, no network, deterministic via
@@ -17,7 +17,8 @@ import pandas as pd
 import pytest
 
 from core.domain.glide import STRATEGY_TERMINAL_EQUITY
-from core.services.scenario import DEFAULT_COAST_AGE, _resolve_pia, build_scenario
+from core.domain.scenario import DEFAULT_COAST_AGE, build_scenario
+from core.domain.social_security import resolve_pia
 
 GOLDENS = Path(__file__).parent / "goldens"
 
@@ -361,7 +362,7 @@ def test_start_value_summed_when_no_total_key():
     assert s.start_value == approx(175000.0, rel=1e-9)
 
 
-# ── PIA resolution: both build_scenario branches + _resolve_pia directly ──────
+# ── PIA resolution: both build_scenario branches + resolve_pia directly ───────
 
 def test_pia_from_retirement_config():
     """Persisted RetirementConfig.pia_annual wins over any estimate."""
@@ -387,13 +388,13 @@ def test_pia_from_income_segments():
 
 
 def test_resolve_pia_direct():
-    """_resolve_pia: segments branch, CSP-income branch, and the zero fallbacks."""
+    """resolve_pia: segments branch, CSP-income branch, and the zero fallbacks."""
     seg_cfg = dict(BASE_CFG, income_segments=INCOME_SEGMENTS)
-    assert _resolve_pia(BASE_CFG, PLAN, LABELS) == approx(38010.6, rel=1e-9)
-    assert _resolve_pia(seg_cfg, PLAN, LABELS) == approx(13744.388571428572, rel=1e-9)
-    assert _resolve_pia(seg_cfg, None, None) == approx(13744.388571428572, rel=1e-9)
-    assert _resolve_pia(None, None, None) == 0.0
-    assert _resolve_pia(BASE_CFG, PLAN, {}) == 0.0  # no key labeled `income`
+    assert resolve_pia(BASE_CFG, PLAN, LABELS) == approx(38010.6, rel=1e-9)
+    assert resolve_pia(seg_cfg, PLAN, LABELS) == approx(13744.388571428572, rel=1e-9)
+    assert resolve_pia(seg_cfg, None, None) == approx(13744.388571428572, rel=1e-9)
+    assert resolve_pia(None, None, None) == 0.0
+    assert resolve_pia(BASE_CFG, PLAN, {}) == 0.0  # no key labeled `income`
 
 
 # ── golden generation (run ONCE per characterization epoch) ───────────────────

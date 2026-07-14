@@ -5,7 +5,7 @@ cockpit: a milestone slider + monthly-contribution input drive the four BANs and
 single accumulation→coast→drawdown chart. See .planning/SPEC-scenario-planning.md
 (Phase 2 — primary screen; the background assumption modules land in Phase 3).
 
-Every number comes from one call into `core.services.scenario.build_scenario`,
+Every number comes from one call into `core.domain.scenario.build_scenario`,
 which resolves all assumptions from `config-store` (UserConfig + RetirementConfig)
 plus the two live inputs — no `retirement-goal-store` handshake, no hidden age
 stores. This module is layout + callbacks only.
@@ -31,6 +31,7 @@ from core.domain.assumptions import (
     PHASES,
     annual_spend_by_phase,
     default_contribution_allocation,
+    default_monthly_contribution,
     household_expense_share,
     merge_household_expenses,
     phase_for_age,
@@ -52,7 +53,6 @@ from core.domain.social_security import (
     estimate_annual_pia_from_income,
 )
 from core.services.firebase import save_retirement_config
-from core.services.forecast import default_monthly_contribution
 from core.services.investments import (
     balances_by_tax_bucket,
     fetch_latest_holdings,
@@ -69,7 +69,7 @@ from core.domain.glide import (
     STRATEGY_TERMINAL_EQUITY,
     equity_weight_path,
 )
-from core.services.scenario import DEFAULT_COAST_AGE, build_scenario
+from core.domain.scenario import DEFAULT_COAST_AGE, build_scenario
 
 dash.register_page(__name__, path="/coast")
 

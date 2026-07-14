@@ -1,12 +1,12 @@
-"""Unified lifetime projection engine (shared by Forecast & Retirement).
+"""Unified lifetime projection engine.
 
-The two pages are one timeline cut at retirement age — Forecast works **forward**
-through accumulation (working + coast) to a nest-egg number; Retirement works the
-drawdown **backward/forward** from that number to death. Historically each page
-carried its own copy of the recurrence; this module stitches the two halves that
-already agreed into a single bucket-level (taxable / trad / roth) walk from
-`current_age` to `death_age`, so both pages — and the future tax-allocation
-feature — read one engine.
+One timeline cut at retirement age — accumulation works **forward** through
+working + coast to a nest-egg number; the drawdown works from that number to
+death. Historically the split Forecast/Retirement pages each carried their own
+copy of the recurrence; this module is the single bucket-level (taxable / trad /
+roth) walk from `current_age` to `death_age` that both halves — and the future
+tax-allocation feature — read. Moved verbatim from core/services/projection.py
+(Phase 5 of the core/ restructuring); pinned by tests/test_lifetime.py.
 
 Three internal phases over the same bucket state, switching the return at the
 retirement seam (returns are phase-scoped — `r_accum` ≠ `r_retire`, mirroring a
@@ -15,17 +15,14 @@ real glide toward less-risky assets in retirement):
     working    (age < coast):       each bucket  V·(1+r_accum) + allocation[bucket]
     coast      (coast ≤ age < ret):  each bucket  V·(1+r_accum)            (no new money)
     retirement (age ≥ ret):          allocate → RMD → grow at r_retire
-                                      (the tax-aware draw lifted from
-                                       drawdown.project_retirement_taxaware)
 
-Pure — no Firestore or network. The accumulation recurrence is identical to
-forecast.project_portfolio's working phase, so the aggregate of the three buckets
-at retirement reconciles with the Forecast page (gated by
-scripts/verify_lifetime_engine.py). The retirement-phase loop body is the same
-math as drawdown.project_retirement_taxaware, so that function becomes a thin
-wrapper with byte-identical output.
+The two thin slices of the engine live here too: `project_retirement_taxaware`
+(retirement-only window, the legacy Retirement-page frame) and
+`project_balances_to_retirement` (accumulation-only window, the at-retirement
+bucket projector) — both byte-identical to the loops they replaced.
 
-See .planning/SPEC-rationalize-pages.md for the full design.
+Pure — no Firestore or network. See .planning/SPEC-rationalize-pages.md for the
+full design.
 """
 
 from __future__ import annotations
@@ -190,3 +187,92 @@ def simulate_lifetime(
         roth *= (1 + rr)
 
     return pd.DataFrame(rows).set_index("age")
+
+
+# ── Thin slices of the engine (retirement-only / accumulation-only windows) ──────
+
+def project_retirement_taxaware(
+    balances: dict,
+    retirement_age: int,
+    death_age: int,
+    spend_by_phase: dict[str, float],
+    slow_go_age: int,
+    no_go_age: int,
+    real_return: float,
+    ss_by_age: pd.Series | dict | None = None,
+    healthcare_by_age: pd.Series | dict | None = None,
+    rmd_start: int = 75,
+    taxable_gain_fraction: float = TAXABLE_GAIN_FRACTION,
+) -> pd.DataFrame:
+    """Year-by-year tax-aware drawdown across taxable / trad / roth buckets.
+
+    Each year: cover the net living need (phase spend + healthcare − Social
+    Security) with after-tax cash, withdrawing taxable → trad → roth, RMDs forced
+    from trad at `rmd_start`. Taxes (ordinary on trad, LTCG on the taxable gain
+    fraction, Roth tax-free) are solved with a short fixed-point loop since the
+    draw must cover spending *and* the tax it generates. Surviving balances grow
+    at `real_return`.
+
+    Returns a DataFrame indexed by `age` with columns:
+        total, taxable, trad, roth, spend, healthcare, income (SS), rmd,
+        withdrawal, w_taxable, w_trad, w_roth, ordinary_income, ltcg_gain,
+        tax, net_spend, phase
+
+    `total` is the portfolio entering each age-year (before that year's draw).
+    All flows are positive magnitudes; the UI negates draws for display.
+
+    Thin wrapper over the shared `simulate_lifetime` engine (retirement slice):
+    with no accumulation window (current_age = coast_age = retirement_age) the
+    engine runs only the tax-aware drawdown, byte-identical to the original loop.
+    The engine's `spend_phase` column is the `phase` returned here.
+    """
+    df = simulate_lifetime(
+        buckets=balances, allocation={},
+        current_age=retirement_age, coast_age=retirement_age,
+        retirement_age=retirement_age, death_age=death_age,
+        spend_by_phase=spend_by_phase, slow_go_age=slow_go_age, no_go_age=no_go_age,
+        r_accum=real_return, r_retire=real_return,
+        ss_by_age=ss_by_age, healthcare_by_age=healthcare_by_age,
+        rmd_start=rmd_start, gain_fraction=taxable_gain_fraction,
+    )
+    out = df.rename(columns={"spend_phase": "phase"})
+    return out[[
+        "total", "taxable", "trad", "roth", "spend", "healthcare", "income",
+        "rmd", "withdrawal", "w_taxable", "w_trad", "w_roth", "ordinary_income",
+        "ltcg_gain", "tax", "net_spend", "phase",
+    ]]
+
+
+def project_balances_to_retirement(
+    current_balances: dict,
+    annual_allocation: dict,
+    years: int,
+    real_return: float,
+) -> dict:
+    """Grow each tax bucket from today to retirement.  (pure)
+
+    Compounds every bucket forward `years` years, adding that bucket's annual
+    contribution each year, using the working-phase recurrence
+    `V' = V·(1+r) + contribution` — so the aggregate of the three buckets
+    reconciles with the legacy Forecast projection given the same start, total
+    contribution, and real return (pinned by tests/test_lifetime.py).
+
+    `current_balances` / `annual_allocation` are {taxable, trad, roth} dicts.
+    Returns {taxable, trad, roth, total} projected at retirement. With years ≤ 0
+    (already at/after retirement) the projection is just the current balances.
+
+    Thin wrapper over the shared `simulate_lifetime` engine (accumulation slice):
+    runs an all-working window of `years` and reads the balances entering
+    retirement. The recurrence is identical, so the result is unchanged.
+    """
+    n = max(int(years), 0)
+    df = simulate_lifetime(
+        buckets=current_balances, allocation=annual_allocation,
+        current_age=0, coast_age=n, retirement_age=n, death_age=n,
+        spend_by_phase={}, slow_go_age=n, no_go_age=n,
+        r_accum=real_return, r_retire=real_return,
+    )
+    row = df.loc[n]
+    out = {b: float(row[b]) for b in ("taxable", "trad", "roth")}
+    out["total"] = out["taxable"] + out["trad"] + out["roth"]
+    return out

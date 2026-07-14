@@ -18,7 +18,7 @@ import pandas as pd
 import pytest
 from pandas.testing import assert_frame_equal
 
-from core.domain import assumptions, drawdown, healthcare, holdings, rmd
+from core.domain import assumptions, drawdown, healthcare, holdings, lifetime, rmd
 from core.domain import social_security
 from core.domain import taxes
 from core.utils import functions as fn
@@ -86,7 +86,7 @@ def _projection() -> pd.DataFrame:
 
 
 def _taxaware() -> pd.DataFrame:
-    return drawdown.project_retirement_taxaware(
+    return lifetime.project_retirement_taxaware(
         {"taxable": 600_000.0, "trad": 700_000.0, "roth": 200_000.0},
         65, 90, SPEND_BY_PHASE, 75, 85, 0.05,
         ss_by_age=_ss_series(), healthcare_by_age=_hc_series(),
@@ -721,14 +721,14 @@ def test_default_contribution_allocation():
 
 def test_project_balances_to_retirement():
     """Per-bucket V' = V·(1+r) + contribution over `years`; years ≤ 0 passthrough."""
-    grown = assumptions.project_balances_to_retirement(
+    grown = lifetime.project_balances_to_retirement(
         {"taxable": 100_000.0, "trad": 200_000.0, "roth": 50_000.0},
         {"taxable": 5_000.0, "trad": 10_000.0, "roth": 7_000.0}, 10, 0.05)
     assert grown["taxable"] == approx(225_778.92535548835)
     assert grown["trad"] == approx(451_557.8507109767)
     assert grown["roth"] == approx(169_489.9790877139)
     assert grown["total"] == approx(846_826.755154179)
-    flat = assumptions.project_balances_to_retirement(
+    flat = lifetime.project_balances_to_retirement(
         {"taxable": 100_000.0, "trad": 200_000.0, "roth": 50_000.0},
         {"taxable": 5_000.0}, 0, 0.05)
     assert flat == {"taxable": 100_000.0, "trad": 200_000.0, "roth": 50_000.0,

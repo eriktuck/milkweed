@@ -1,16 +1,17 @@
-"""Characterization tests: the unified lifetime engine + Forecast pure math.
+"""Characterization tests: the unified lifetime engine + accumulation pure math.
 
 Pins the CURRENT behavior of:
-  * core/services/projection.py::simulate_lifetime  (the shared engine)
-  * core/services/forecast.py pure functions (project_portfolio,
-    forecast_summary, required_monthly_contribution, defaults,
+  * core/domain/lifetime.py::simulate_lifetime (the shared engine) and
+    project_balances_to_retirement (its accumulation-only wrapper)
+  * core/domain/accumulation.py (coast_target, required_monthly_contribution,
     trailing_12mo_contribution)
-  * core/domain/assumptions.py::project_balances_to_retirement and
-    default_contribution_allocation (they feed the lifetime walk)
+  * core/domain/assumptions.py defaults (default_monthly_contribution,
+    default_annual_retirement_spend, default_contribution_allocation)
 
-project_portfolio / forecast_summary are slated for DELETION in Phase 5 on the
-claim that simulate_lifetime reproduces them — the goldens and reconciliation
-tests here are that proof obligation.
+forecast.py's project_portfolio / forecast_summary were DELETED in Phase 5 on
+the proof that simulate_lifetime reproduces them: the frozen golden
+forecast_project_portfolio.csv and the pinned constants in the reconciliation
+tests below are that proof, kept live against the engine.
 
 Cases ported from scripts/verify_lifetime_engine.py and
 scripts/verify_balance_projector.py. All inputs are synthetic; no Firestore,
@@ -30,18 +31,19 @@ import pandas as pd
 import pandas.testing as pdt
 import pytest
 
-from core.services.forecast import (
-    default_annual_retirement_spend,
-    default_monthly_contribution,
-    forecast_summary,
-    project_portfolio,
+from core.domain.accumulation import (
+    coast_target,
     required_monthly_contribution,
     trailing_12mo_contribution,
 )
-from core.services.projection import simulate_lifetime
 from core.domain.assumptions import (
+    default_annual_retirement_spend,
     default_contribution_allocation,
+    default_monthly_contribution,
+)
+from core.domain.lifetime import (
     project_balances_to_retirement,
+    simulate_lifetime,
 )
 
 # Column contract of the unified frame (order matters — pinned).
@@ -51,12 +53,6 @@ LIFETIME_COLS = [
     "w_taxable", "w_trad", "w_roth", "ordinary_income", "ltcg_gain",
     "tax", "net_spend",
 ]
-
-FORECAST_COLS = [
-    "total", "principal", "growth", "contribution", "withdrawal",
-    "sustainable_income", "phase",
-]
-
 
 # ── Fixture builders (synthetic, deterministic) ────────────────────────────────
 
@@ -106,16 +102,6 @@ def _full_walk_case():
 def _glide_path():
     """Dense age→rate glide: 7% at 40 declining 0.1 pp/yr to 4.6% at 64."""
     return {age: 0.07 - 0.001 * (age - 40) for age in range(40, 65)}
-
-
-def _forecast_case():
-    """The forecast golden case: 250k start, work 40–49, coast 50–64,
-    retirement 65–90 at 5% real with a 30k annual contribution."""
-    return project_portfolio(
-        start_value=250_000.0, current_age=40, coast_age=50,
-        retirement_age=65, horizon_age=90,
-        annual_contribution=30_000.0, real_return=0.05,
-    )
 
 
 def _csp_plan_and_labels():
@@ -348,8 +334,9 @@ def test_lifetime_bucket_split_is_additive():
 
 
 def test_lifetime_reconciles_with_project_portfolio():
-    """The engine's accumulation aggregate equals Forecast's project_portfolio
-    for the same start/contribution/rate — the Phase 5 deletion invariant."""
+    """The engine's accumulation aggregate equals the value the deleted
+    forecast.project_portfolio produced for the same start/contribution/rate,
+    pinned as a constant before the deletion — the Phase 5 invariant."""
     engine = simulate_lifetime(
         buckets={"taxable": 250_000.0, "trad": 0.0, "roth": 0.0},
         allocation={"taxable": 30_000.0, "trad": 0.0, "roth": 0.0},
@@ -357,92 +344,63 @@ def test_lifetime_reconciles_with_project_portfolio():
         spend_by_phase={}, slow_go_age=65, no_go_age=65,
         r_accum=0.05, r_retire=0.05,
     )
-    fdf = project_portfolio(
-        start_value=250_000.0, current_age=40, coast_age=65,
-        retirement_age=65, horizon_age=65,
-        annual_contribution=30_000.0, real_return=0.05,
-    )
-    assert float(engine.loc[65, "total"]) == pytest.approx(
-        float(fdf.loc[65, "total"]), rel=1e-9)
     assert float(engine.loc[65, "total"]) == pytest.approx(
         2278401.699764478, rel=1e-9)
 
 
-# ── forecast.project_portfolio ────────────────────────────────────────────────
+# ── The deleted forecast.project_portfolio, pinned via its frozen golden ──────
 
-def test_project_portfolio_golden(goldens_dir):
-    """The three-phase fixed-rate projection matches its golden frame."""
-    _assert_matches_golden(_forecast_case(), goldens_dir,
-                           "forecast_project_portfolio.csv")
-
-
-def test_project_portfolio_pins():
-    """Column contract, phase boundaries, and headline values."""
-    df = _forecast_case()
-    assert list(df.columns) == FORECAST_COLS
-    assert df.index.name == "age"
-    assert (df.loc[40:49, "phase"] == "working").all()
-    assert (df.loc[50:64, "phase"] == "coast").all()
-    assert (df.loc[65:, "phase"] == "retirement").all()
-
-    assert float(df.loc[50, "total"]) == pytest.approx(784560.4327608253, rel=1e-9)
-    assert float(df.loc[65, "total"]) == pytest.approx(1631044.792117658, rel=1e-9)
-    assert float(df.loc[90, "total"]) == pytest.approx(2409495.1518173027, rel=1e-9)
-
-    # The retirement draw is locked at swr × value entering retirement and
-    # held flat; sustainable_income at 65 equals it.
-    draw = 65241.791684706324
-    assert float(df.loc[65, "withdrawal"]) == pytest.approx(draw, rel=1e-9)
-    assert float(df.loc[66, "withdrawal"]) == pytest.approx(draw, rel=1e-9)
-    assert (df.loc[65:, "withdrawal"] == df.loc[65, "withdrawal"]).all()
-    assert float(df.loc[65, "sustainable_income"]) == pytest.approx(draw, rel=1e-9)
-
-    # principal held flat after the coast point; growth = total − principal.
-    assert float(df.loc[65, "principal"]) == pytest.approx(550_000.0, rel=1e-9)
-    assert float(df.loc[65, "growth"]) == pytest.approx(1081044.792117658, rel=1e-9)
-    assert (df.loc[40:49, "contribution"] == 30_000.0).all()
-    assert (df.loc[50:, "contribution"] == 0.0).all()
+def test_lifetime_reproduces_project_portfolio_golden(goldens_dir):
+    """simulate_lifetime reproduces the accumulation totals of the frozen
+    project_portfolio golden (250k start, work 40–49, coast 50–64, 30k/yr at
+    5% real) — the deletion proof, kept live against the engine. Only the
+    shared columns (total, contribution) over the shared ages (40–65) compare;
+    the golden's drawdown rows pin the deleted SWR draw model, not the engine."""
+    engine = simulate_lifetime(
+        buckets={"taxable": 250_000.0, "trad": 0.0, "roth": 0.0},
+        allocation={"taxable": 30_000.0, "trad": 0.0, "roth": 0.0},
+        current_age=40, coast_age=50, retirement_age=65, death_age=65,
+        spend_by_phase={}, slow_go_age=65, no_go_age=65,
+        r_accum=0.05, r_retire=0.05,
+    )
+    golden = _read_golden(goldens_dir, "forecast_project_portfolio.csv")
+    for age in range(40, 66):
+        assert float(engine.loc[age, "total"]) == pytest.approx(
+            float(golden.loc[age, "total"]), rel=1e-9)
+        assert float(engine.loc[age, "contribution"]) == pytest.approx(
+            float(golden.loc[age, "contribution"]), rel=1e-9)
 
 
-# ── forecast.forecast_summary ─────────────────────────────────────────────────
+# ── accumulation.coast_target (ex-forecast_summary math) ──────────────────────
 
-def test_forecast_summary_unreachable_goal():
-    """Goal above the projection: negative surplus, no coast point."""
-    s = forecast_summary(_forecast_case(), 2_000_000.0, 0.05, 250_000.0, 40, 50, 65)
-    assert s["retirement_goal"] == pytest.approx(2_000_000.0, rel=1e-9)
-    assert s["coast_target"] == pytest.approx(962034.1961819399, rel=1e-9)
-    assert s["projected_at_coast"] == pytest.approx(784560.4327608253, rel=1e-9)
-    assert s["coast_surplus"] == pytest.approx(-177473.76342111465, rel=1e-9)
-    assert s["coast_point_age"] is None
-    assert s["required_monthly"] == pytest.approx(3675.831344026307, rel=1e-9)
-    assert s["projected_at_retirement"] == pytest.approx(1631044.792117658, rel=1e-9)
-    assert "sustainable_income" not in s
+def test_coast_target_pins():
+    """PV of the goal discounted from retirement back to the coast age — the
+    coast_target values the deleted forecast_summary produced, pinned before
+    its deletion."""
+    assert coast_target(2_000_000.0, 0.05, 50, 65) == pytest.approx(
+        962034.1961819399, rel=1e-9)
+    assert coast_target(1_000_000.0, 0.05, 50, 65) == pytest.approx(
+        481017.09809096996, rel=1e-9)
 
 
-def test_forecast_summary_reachable_goal():
-    """Goal within reach: positive surplus and an early coast point age."""
-    s = forecast_summary(_forecast_case(), 1_000_000.0, 0.05, 250_000.0, 40, 50, 65)
-    assert s["coast_target"] == pytest.approx(481017.09809096996, rel=1e-9)
-    assert s["coast_surplus"] == pytest.approx(303543.3346698553, rel=1e-9)
-    assert s["coast_point_age"] == 42
-    assert s["required_monthly"] == pytest.approx(488.9096827896473, rel=1e-9)
+def test_coast_target_no_growth_window():
+    """coast_age ≥ retirement_age → no growth years, target == goal."""
+    assert coast_target(2_000_000.0, 0.05, 65, 65) == 2_000_000.0
+    assert coast_target(2_000_000.0, 0.05, 70, 65) == 2_000_000.0
 
 
-def test_forecast_summary_fallbacks():
-    """Frames ending before retirement/coast fall back to the last row."""
-    # Horizon before retirement → projected_at_retirement = last row's total.
-    short = project_portfolio(250_000.0, 40, 50, 65, 60, 30_000.0, 0.05)
-    s = forecast_summary(short, 2_000_000.0, 0.05, 250_000.0, 40, 50, 65)
-    assert s["projected_at_retirement"] == pytest.approx(1277966.2733062932, rel=1e-9)
-    assert s["coast_point_age"] is None
-
-    # Horizon before the coast age → projected_at_coast = last row's total.
-    shorter = project_portfolio(250_000.0, 40, 50, 65, 48, 30_000.0, 0.05)
-    s = forecast_summary(shorter, 2_000_000.0, 0.05, 250_000.0, 40, 50, 65)
-    assert s["projected_at_coast"] == pytest.approx(655837.1272207032, rel=1e-9)
+def test_required_monthly_to_coast_target():
+    """required_monthly against coast_target reproduces the required_monthly
+    values the deleted forecast_summary produced (250k start, work 40–49)."""
+    assert required_monthly_contribution(
+        250_000.0, 40, 50, coast_target(2_000_000.0, 0.05, 50, 65), 0.05,
+    ) == pytest.approx(3675.831344026307, rel=1e-9)
+    assert required_monthly_contribution(
+        250_000.0, 40, 50, coast_target(1_000_000.0, 0.05, 50, 65), 0.05,
+    ) == pytest.approx(488.9096827896473, rel=1e-9)
 
 
-# ── forecast.required_monthly_contribution ────────────────────────────────────
+# ── accumulation.required_monthly_contribution ────────────────────────────────
 
 @pytest.mark.parametrize("start, cur, coast, target, r, expected", [
     (250_000.0, 40, 50, 1_000_000.0, 0.05, 3927.369268674372),
@@ -456,7 +414,7 @@ def test_required_monthly_contribution(start, cur, coast, target, r, expected):
     assert got == pytest.approx(expected, rel=1e-9, abs=1e-12)
 
 
-# ── forecast defaults from the CSP plan ───────────────────────────────────────
+# ── assumptions defaults from the CSP plan ────────────────────────────────────
 
 def test_default_monthly_contribution():
     """Sum of `investments`-labeled monthly plan lines; None inputs → 0."""
@@ -474,7 +432,7 @@ def test_default_annual_retirement_spend():
     assert default_annual_retirement_spend({}, {}) == 0.0
 
 
-# ── forecast.trailing_12mo_contribution ───────────────────────────────────────
+# ── accumulation.trailing_12mo_contribution ───────────────────────────────────
 # Anchored on the MAX transaction date (not wall clock), so fixed synthetic
 # dates are deterministic.
 
@@ -544,17 +502,13 @@ def test_project_balances_zero_or_negative_years(years):
 
 
 def test_project_balances_reconciles_with_project_portfolio():
-    """Bucket projector aggregate == Forecast total for the same inputs
-    (verify_balance_projector gate criterion)."""
+    """Bucket projector aggregate == the pinned total the deleted
+    forecast.project_portfolio produced for the same inputs
+    (verify_balance_projector gate criterion, frozen as a constant)."""
     alloc = default_contribution_allocation(30_000.0)
     proj = project_balances_to_retirement(
         {"taxable": 250_000.0, "trad": 0.0, "roth": 0.0}, alloc, 25, 0.05)
-    fdf = project_portfolio(
-        start_value=250_000.0, current_age=40, coast_age=65,
-        retirement_age=65, horizon_age=65,
-        annual_contribution=30_000.0, real_return=0.05,
-    )
-    assert proj["total"] == pytest.approx(float(fdf.loc[65, "total"]), rel=1e-9)
+    assert proj["total"] == pytest.approx(2278401.699764478, rel=1e-9)
 
 
 # ── Golden generation (run ONCE per characterization epoch) ───────────────────
@@ -576,7 +530,9 @@ def _generate_goldens() -> None:
             spend_by_phase={}, slow_go_age=65, no_go_age=65,
             r_accum=_glide_path(), r_retire=0.04,
         ),
-        "forecast_project_portfolio.csv": _forecast_case(),
+        # forecast_project_portfolio.csv is NOT regenerable: it pins the
+        # DELETED forecast.project_portfolio (written before Phase 5 removed
+        # it) and survives as the frozen legacy pin the engine must reproduce.
     }
     for name, df in frames.items():
         path = GOLDENS_DIR / name

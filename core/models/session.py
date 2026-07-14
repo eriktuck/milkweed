@@ -60,9 +60,9 @@ class RetirementConfig(BaseModel):
     account_balances: Dict[str, float] | None = None
 
     # ── Coast page assumption-module edits (.planning/SPEC-scenario-planning.md) ──
-    # All optional → core/services defaults apply (no migration; see the class
+    # All optional → engine defaults apply (no migration; see the class
     # docstring). The Coast page's collapsible assumption cards persist here via
-    # save_retirement_config, and core/services/scenario.build_scenario reads them
+    # save_retirement_config, and core/domain/scenario.build_scenario reads them
     # as the per-user defaults for each live input.
 
     # Healthcare glide overrides (annual real $, per individual). Keys mirror

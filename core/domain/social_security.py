@@ -7,9 +7,10 @@ pipeline (covered_earnings → AIME → primary_insurance_amount →
 social_security_income, 2025 constants) moved verbatim from
 core/services/retirement.py (Phase 4). Pinned by tests/test_retirement_math.py.
 
-FUTURE HOME (Phase 5): a consolidated resolve_pia (deduplicating
-scenario._resolve_pia and drawdown.default_nest_egg_goal). Later feature work:
-pad_earnings_to_35 (see docs/porting-backlog.md once created).
+`resolve_pia` (Phase 5) is the single config→PIA resolution path — it replaced
+the duplicated logic in scenario's `_resolve_pia` and inside
+drawdown.default_nest_egg_goal. Later feature work: pad_earnings_to_35 (see
+docs/porting-backlog.md once created).
 """
 import csv
 import io
@@ -122,6 +123,33 @@ def social_security_income(
     start = max(int(claim_age), int(retirement_age))
     ages = range(int(retirement_age), int(death_age) + 1)
     return pd.Series({age: (benefit if age >= start else 0.0) for age in ages})
+
+
+def resolve_pia(
+    user_cfg: dict | None,
+    active_plan: dict | None,
+    csp_labels: dict | None,
+) -> float:
+    """Annual Social Security benefit at FRA, preferring real earnings history.
+
+    The single config→PIA resolution path (consolidated in Phase 5 from
+    scenario's `_resolve_pia` and drawdown.default_nest_egg_goal): use the
+    Profile income segments via `annual_pia_from_earnings` when present, else
+    estimate from the CSP `income` lines assuming a constant career, else 0 —
+    so the slider-driven goal and the config-default goal always share the
+    identical Social Security basis.
+    """
+    segments = (user_cfg or {}).get("income_segments")
+    if segments:
+        return annual_pia_from_earnings(segments_to_annual_income(segments))
+
+    labels = csp_labels or {}
+    annual_income = 12.0 * sum(
+        float(amt)
+        for key, amt in (active_plan or {}).items()
+        if labels.get(key) == "income"
+    )
+    return estimate_annual_pia_from_income(annual_income) if annual_income else 0.0
 
 
 def calculate_social_security_benefit(earnings: pd.Series, claim_age: int) -> float:

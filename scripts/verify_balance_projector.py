@@ -3,21 +3,25 @@
 Pure check — no Firestore. Confirms:
   1. `default_contribution_allocation` fills tax-advantaged-first (pre-tax cap →
      Roth cap → taxable) and always sums to the contribution.
-  2. `project_balances_to_retirement`'s aggregate **reconciles with Forecast's
-     `project_portfolio`** — the gate criterion — for the same start, total
+  2. `project_balances_to_retirement`'s aggregate **reconciles with the pinned
+     project_portfolio total** — the gate criterion — for the same start, total
      contribution, and real return (coast_age = retirement_age, i.e. all-working).
+     (project_portfolio was deleted in Phase 5; its value is frozen below.)
 
 Run from the repo root:
     python -m scripts.verify_balance_projector
 """
 
-from core.services.forecast import project_portfolio
 from core.domain.assumptions import (
     PRETAX_CONTRIB_CAP,
     ROTH_CONTRIB_CAP,
     default_contribution_allocation,
-    project_balances_to_retirement,
 )
+from core.domain.lifetime import project_balances_to_retirement
+
+# Total the deleted forecast.project_portfolio produced for the case in
+# check_reconciles_with_forecast, captured before Phase 5 removed it.
+FORECAST_TOTAL = 2278401.699764
 
 
 def check_allocation() -> None:
@@ -49,17 +53,9 @@ def check_reconciles_with_forecast() -> None:
     current = {"taxable": start, "trad": 0.0, "roth": 0.0}
     proj = project_balances_to_retirement(current, alloc, years, r)
 
-    # Forecast: all-working (coast_age = retirement_age), same total contribution.
-    fdf = project_portfolio(
-        start_value=start, current_age=current_age, coast_age=retirement_age,
-        retirement_age=retirement_age, horizon_age=retirement_age,
-        annual_contribution=annual_contribution, real_return=r,
-    )
-    forecast_total = float(fdf.loc[retirement_age, "total"])
-
-    diff = abs(proj["total"] - forecast_total)
-    assert diff < 1.0, f"projector {proj['total']:,.2f} != forecast {forecast_total:,.2f}"
-    print(f"  reconciles with Forecast ✓  {proj['total']:,.0f} at age {retirement_age} "
+    diff = abs(proj["total"] - FORECAST_TOTAL)
+    assert diff < 1e-3, f"projector {proj['total']:,.2f} != pinned forecast {FORECAST_TOTAL:,.2f}"
+    print(f"  reconciles with pinned Forecast total ✓  {proj['total']:,.0f} at age {retirement_age} "
           f"(Δ {diff:.4f})")
 
     # Bucket split is additive: summing buckets equals the single-bucket total.

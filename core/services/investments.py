@@ -355,6 +355,14 @@ def fetch_latest_holdings(uid: str) -> list[dict]:
     return doc.to_dict().get("holdings", []) if doc.exists else []
 
 
+def current_portfolio_value(uid: str) -> float:
+    """Total current portfolio value = Σ holdings.total_value for the user.
+
+    Thin fetch+sum wrapper (moved from core/services/forecast.py, Phase 5).
+    """
+    return sum(h.get("total_value", 0.0) for h in fetch_latest_holdings(uid))
+
+
 def fetch_investment_transactions(
     uid: str,
     start_date: Optional[str] = None,

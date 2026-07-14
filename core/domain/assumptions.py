@@ -43,6 +43,52 @@ DEFAULTS: dict = {
 # *excess* inflation) — add a dedicated rate there, not a top-level inflation
 # field.
 
+# CSP labels (see CLAUDE.md): fixed · investments · sinking · guilt-free · income.
+#
+# Portfolio contributions are the `investments` label (the Monarch "Savings" csp
+# key — money moved into long-term investment accounts). The `sinking` label is
+# sinking funds for near/midterm goals (gifts/vacations/home improvements); those
+# are recurring living expenses that persist in retirement, so they count toward
+# retirement spend, NOT the contribution lever.
+CONTRIBUTION_LABELS: frozenset[str] = frozenset({"investments"})
+RETIREMENT_SPEND_LABELS: frozenset[str] = frozenset({"fixed", "guilt-free", "sinking"})
+
+
+def _sum_plan_for_labels(
+    active_plan: dict | None,
+    csp_labels: dict | None,
+    labels: frozenset[str],
+) -> float:
+    """Sum monthly CSP-plan amounts whose category maps to one of `labels`."""
+    if not active_plan or not csp_labels:
+        return 0.0
+    return sum(
+        float(amount)
+        for category, amount in active_plan.items()
+        if csp_labels.get(category) in labels
+    )
+
+
+def default_monthly_contribution(
+    active_plan: dict | None, csp_labels: dict | None
+) -> float:
+    """Default monthly portfolio contribution = Σ monthly CSP plan for the
+    `investments` label (long-term money moved into investment accounts)."""
+    return _sum_plan_for_labels(active_plan, csp_labels, CONTRIBUTION_LABELS)
+
+
+def default_annual_retirement_spend(
+    active_plan: dict | None, csp_labels: dict | None
+) -> float:
+    """Default annual retirement spend = 12 × Σ monthly recurring living expenses.
+
+    Recurring expenses are the `fixed`, `guilt-free`, and `sinking` labels —
+    the last being sinking funds (gifts/vacations/home improvements) that persist
+    in retirement. Portfolio contributions (`investments`) stop at retirement and
+    are excluded.
+    """
+    return 12.0 * _sum_plan_for_labels(active_plan, csp_labels, RETIREMENT_SPEND_LABELS)
+
 
 # ════════════════════════════════════════════════════════════════════════════
 # 2. Spending-phase crosswalk  (research §"Expenses pane", retirement-notes.md)
@@ -323,43 +369,3 @@ def default_contribution_allocation(
     roth = min(c - trad, float(roth_cap))
     taxable = max(c - trad - roth, 0.0)
     return {"taxable": taxable, "trad": trad, "roth": roth}
-
-
-def project_balances_to_retirement(
-    current_balances: dict,
-    annual_allocation: dict,
-    years: int,
-    real_return: float,
-) -> dict:
-    """Grow each tax bucket from today to retirement.  (pure)
-
-    Compounds every bucket forward `years` years, adding that bucket's annual
-    contribution each year, using the **same working-phase recurrence as
-    Forecast's `project_portfolio`** — `V' = V·(1+r) + contribution` — so the
-    aggregate of the three buckets reconciles with the Forecast page given the
-    same start, total contribution, and real return.
-
-    `current_balances` / `annual_allocation` are {taxable, trad, roth} dicts.
-    Returns {taxable, trad, roth, total} projected at retirement. With years ≤ 0
-    (already at/after retirement) the projection is just the current balances.
-
-    Thin wrapper over the shared `simulate_lifetime` engine (accumulation slice):
-    runs an all-working window of `years` and reads the balances entering
-    retirement. The recurrence is identical, so the result is unchanged.
-    (`simulate_lifetime` lives in core/services/projection.py until Phase 5
-    moves it to core/domain/lifetime.py — imported lazily so importing this
-    module never pulls in core.services.)
-    """
-    from core.services.projection import simulate_lifetime
-
-    n = max(int(years), 0)
-    df = simulate_lifetime(
-        buckets=current_balances, allocation=annual_allocation,
-        current_age=0, coast_age=n, retirement_age=n, death_age=n,
-        spend_by_phase={}, slow_go_age=n, no_go_age=n,
-        r_accum=real_return, r_retire=real_return,
-    )
-    row = df.loc[n]
-    out = {b: float(row[b]) for b in ("taxable", "trad", "roth")}
-    out["total"] = out["taxable"] + out["trad"] + out["roth"]
-    return out

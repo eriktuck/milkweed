@@ -1,9 +1,9 @@
-"""Importing the scenario engine must never touch firebase_admin.
+"""Importing the domain engine must never touch firebase_admin.
 
-Pins the Phase 0 lazy-import fix (retirement.py / forecast.py): the math
-modules only import core.services.investments inside their edge functions,
-so `import core.services.scenario` is credential-free. From Phase 2 on this
-test extends to `import core.domain`.
+Pins the Phase 0 lazy-import fix and the Phase 5 dissolution: core/domain/ is
+pure math (no I/O imports at module scope), so `import core.domain` — whose
+façade pulls in scenario, lifetime, and everything beneath them — is
+credential-free.
 
 Run in a subprocess so the check is immune to import order elsewhere in the
 test session.
@@ -17,14 +17,14 @@ REPO_ROOT = Path(__file__).parent.parent
 
 CHECK = (
     "import sys; "
-    "import core.services.scenario; "
+    "import core.domain; "
     "assert 'firebase_admin' not in sys.modules, 'firebase_admin was imported'; "
     "assert 'core.services.firebase' not in sys.modules, "
     "'core.services.firebase was imported'"
 )
 
 
-def test_importing_scenario_does_not_touch_firebase():
+def test_importing_domain_does_not_touch_firebase():
     result = subprocess.run(
         [sys.executable, "-c", CHECK],
         cwd=REPO_ROOT,

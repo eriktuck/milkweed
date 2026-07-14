@@ -1,4 +1,4 @@
-"""Verify the unified Coast scenario builder (core/services/scenario.build_scenario).
+"""Verify the unified Coast scenario builder (core/domain/scenario.build_scenario).
 
 Pure check — no Firestore. Gates Phase 1 of .planning/SPEC-scenario-planning.md:
 the consolidated `build_scenario` must reproduce the numbers the legacy split
@@ -6,19 +6,20 @@ pages produced, so collapsing Forecast + Retirement onto one screen moves no
 dashboard value.
 
 Reconciliation, for one sample config:
-  1. Backward goal == `retirement.default_nest_egg_goal` (legacy Retirement default).
-  2. Accumulation aggregate (projected at coast / retirement) == Forecast's
-     `project_portfolio` totals at those ages.
-  3. CoastFIRE target + required monthly == Forecast's `forecast_summary`
-     (computed off project_portfolio + the goal).
+  1. Backward goal == `drawdown.default_nest_egg_goal` (legacy Retirement default).
+  2. Live overrides move the numbers in the expected direction.
+
+(The former project_portfolio / forecast_summary reconciliation checks were
+retired with those functions in Phase 5 — the equivalence is pinned by
+tests/test_lifetime.py against the frozen forecast_project_portfolio.csv
+golden and its constants.)
 
 Run from the repo root:
     python -m scripts.verify_scenario
 """
 
-from core.services.forecast import forecast_summary, project_portfolio
 from core.domain.drawdown import default_nest_egg_goal
-from core.services.scenario import build_scenario
+from core.domain.scenario import build_scenario
 
 TOL = 1e-3
 
@@ -59,39 +60,6 @@ def check_goal_matches_legacy_default() -> None:
     print(f"  goal matches legacy default ✓  {s.nest_egg_goal:,.0f}")
 
 
-def check_accumulation_reconciles_with_forecast() -> None:
-    s = _scenario()
-    pp = project_portfolio(
-        start_value=s.start_value, current_age=s.current_age, coast_age=s.coast_age,
-        retirement_age=s.retirement_age, horizon_age=s.retirement_age,
-        annual_contribution=s.annual_contribution, real_return=s.real_return,
-    )
-    at_coast = float(pp.loc[s.coast_age, "total"])
-    at_ret = float(pp.loc[s.retirement_age, "total"])
-    assert abs(s.projected_at_coast - at_coast) < 1.0, (s.projected_at_coast, at_coast)
-    assert abs(s.projected_at_retirement - at_ret) < 1.0, (s.projected_at_retirement, at_ret)
-    print(f"  accumulation reconciles with Forecast ✓  "
-          f"coast {s.projected_at_coast:,.0f} / ret {s.projected_at_retirement:,.0f}")
-
-
-def check_bans_match_forecast_summary() -> None:
-    s = _scenario()
-    pp = project_portfolio(
-        start_value=s.start_value, current_age=s.current_age, coast_age=s.coast_age,
-        retirement_age=s.retirement_age, horizon_age=s.retirement_age,
-        annual_contribution=s.annual_contribution, real_return=s.real_return,
-    )
-    summary = forecast_summary(
-        pp, s.nest_egg_goal, s.real_return, s.start_value,
-        s.current_age, s.coast_age, s.retirement_age,
-    )
-    assert abs(s.coast_target - summary["coast_target"]) < TOL, s.coast_target
-    assert abs(s.required_monthly - summary["required_monthly"]) < TOL, s.required_monthly
-    assert abs(s.projected_at_coast - summary["projected_at_coast"]) < 1.0
-    print(f"  BANs match forecast_summary ✓  target {s.coast_target:,.0f} · "
-          f"required ${s.required_monthly:,.0f}/mo · on_track={s.on_track}")
-
-
 def check_live_override_moves_numbers() -> None:
     # Sanity: retiring earlier shortens the drawdown horizon's discounting and
     # raises the goal, lifting the CoastFIRE target the user must hit.
@@ -108,8 +76,6 @@ def check_live_override_moves_numbers() -> None:
 
 def main() -> None:
     check_goal_matches_legacy_default()
-    check_accumulation_reconciles_with_forecast()
-    check_bans_match_forecast_summary()
     check_live_override_moves_numbers()
     print("\nUnified scenario builder verified ✓")
 
