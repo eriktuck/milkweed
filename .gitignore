@@ -75,3 +75,6 @@ graphify-out
 
 # AI
 .planning
+.agents/
+.claude/
+skills-lock.json
