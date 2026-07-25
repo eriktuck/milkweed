@@ -56,7 +56,7 @@ LIFETIME_COLS = [
 
 # ── Fixture builders (synthetic, deterministic) ────────────────────────────────
 
-def _accum_only_case(r_accum=0.05):
+def _accum_only_case(r_accum=0.05, **kw):
     """Accumulation-only walk: working (40–54) + coast (55–64), one zero-spend
     retirement row at 65 (death_age == retirement_age)."""
     return simulate_lifetime(
@@ -64,11 +64,11 @@ def _accum_only_case(r_accum=0.05):
         allocation={"taxable": 6_000.0, "trad": 23_500.0, "roth": 6_500.0},
         current_age=40, coast_age=55, retirement_age=65, death_age=65,
         spend_by_phase={}, slow_go_age=65, no_go_age=65,
-        r_accum=r_accum, r_retire=0.05,
+        r_accum=r_accum, r_retire=0.05, **kw,
     )
 
 
-def _drawdown_only_case():
+def _drawdown_only_case(**kw):
     """Drawdown-only walk — the verify_lifetime_engine tax-aware case, run
     directly through the engine (no accumulation window)."""
     ss = {a: (24_000.0 if a >= 67 else 0.0) for a in range(65, 91)}
@@ -80,11 +80,11 @@ def _drawdown_only_case():
         current_age=65, coast_age=65, retirement_age=65, death_age=90,
         spend_by_phase={"go_go": 70_000.0, "slow_go": 60_000.0, "no_go": 50_000.0},
         slow_go_age=75, no_go_age=85, r_accum=0.04, r_retire=0.04,
-        ss_by_age=ss, healthcare_by_age=hc, rmd_start=75, gain_fraction=0.5,
+        ss_by_age=ss, healthcare_by_age=hc, rmd_start=75, gain_fraction=0.5, **kw,
     )
 
 
-def _full_walk_case():
+def _full_walk_case(**kw):
     """Full walk: working (50–59) → coast (60–66) → retirement (67–92),
     crossing rmd_start=75 with a live trad balance."""
     ss = {a: (30_000.0 if a >= 70 else 0.0) for a in range(67, 93)}
@@ -95,7 +95,7 @@ def _full_walk_case():
         current_age=50, coast_age=60, retirement_age=67, death_age=92,
         spend_by_phase={"go_go": 70_000.0, "slow_go": 60_000.0, "no_go": 50_000.0},
         slow_go_age=75, no_go_age=85, r_accum=0.05, r_retire=0.04,
-        ss_by_age=ss, healthcare_by_age=hc, rmd_start=75, gain_fraction=0.5,
+        ss_by_age=ss, healthcare_by_age=hc, rmd_start=75, gain_fraction=0.5, **kw,
     )
 
 
@@ -294,6 +294,99 @@ def test_lifetime_empty_glide_map_means_zero_rate():
         r_accum={}, r_retire=0.05,
     )
     assert float(df.loc[42, "total"]) == 102_000.0
+
+
+# ── simulate_lifetime: inflows + taxed ordinary income (SPEC-housing Phase 2) ──
+
+@pytest.mark.parametrize("case", [_accum_only_case, _drawdown_only_case,
+                                  _full_walk_case])
+@pytest.mark.parametrize("payload", [
+    {"inflows_by_age": None, "ordinary_income_by_age": None},           # explicit None
+    {"inflows_by_age": {}, "ordinary_income_by_age": {}},               # empty map
+    {"inflows_by_age": {a: 0.0 for a in range(40, 93)},                 # explicit zeros
+     "ordinary_income_by_age": {a: 0.0 for a in range(40, 93)}},
+])
+def test_new_channels_are_no_ops_when_unset(case, payload):
+    """The hard constraint: absent housing config must change nothing, anywhere.
+
+    None, an empty map and a map of zeros must all reproduce the baseline frame
+    exactly, in every leg — that is what keeps tests/goldens/*.csv from moving.
+    """
+    pdt.assert_frame_equal(case(**payload), case())
+
+
+def test_inflow_lands_in_taxable_before_growth_during_accumulation():
+    """A lump sum at 45 is in taxable and compounding by 46."""
+    base = _accum_only_case()
+    df = _accum_only_case(inflows_by_age={45: 200_000.0})
+    # Untouched through age 45 (the row records the balance *entering* the year).
+    assert float(df.loc[45, "taxable"]) == pytest.approx(
+        float(base.loc[45, "taxable"]), rel=1e-12)
+    # Pre-growth: the inflow earns that year's return.
+    assert float(df.loc[46, "taxable"]) - float(base.loc[46, "taxable"]) == (
+        pytest.approx(200_000.0 * 1.05, rel=1e-12))
+
+
+def test_inflow_is_not_clipped_by_the_cash_need_clamp():
+    """The reason inflows need their own hook rather than riding `income_by_age`.
+
+    `cash_need = max(spend + hc − income, 0)` would clip a large lump sum to
+    zero; routed through `inflows_by_age` the whole sum reaches the portfolio.
+    """
+    base = _drawdown_only_case()
+    df = _drawdown_only_case(inflows_by_age={70: 500_000.0})
+    # Nothing before the event; the full step-up lands the very next year.
+    assert float(df.loc[70, "total"]) == pytest.approx(
+        float(base.loc[70, "total"]), rel=1e-12)
+    assert float(df.loc[71, "total"]) - float(base.loc[71, "total"]) == (
+        pytest.approx(500_000.0 * 1.04, rel=1e-9))
+
+
+def test_ordinary_income_offsets_spending_and_is_taxed():
+    """Taxed outside income both funds the year and enters the fixed-point."""
+    base = _drawdown_only_case()
+    df = _drawdown_only_case(
+        ordinary_income_by_age={a: 12_000.0 for a in range(65, 91)})
+    # It offsets the living need, so less is drawn from the portfolio...
+    assert float(df.loc[70, "withdrawal"]) < float(base.loc[70, "withdrawal"])
+    # ...and unlike ss_by_age it shows up as taxable ordinary income.
+    assert float(df.loc[70, "ordinary_income"]) == pytest.approx(
+        float(df.loc[70, "w_trad"]) + 12_000.0, rel=1e-12)
+    assert float(df.loc[70, "income"]) == 24_000.0    # `income` stays SS-only
+
+
+def test_ordinary_income_is_taxed_unlike_social_security():
+    """The same dollars through the taxed channel leave a smaller portfolio."""
+    common = dict(
+        buckets={"taxable": 400_000.0, "trad": 300_000.0, "roth": 100_000.0},
+        allocation={},
+        current_age=65, coast_age=65, retirement_age=65, death_age=90,
+        spend_by_phase={"go_go": 70_000.0, "slow_go": 60_000.0, "no_go": 50_000.0},
+        slow_go_age=75, no_go_age=85, r_accum=0.04, r_retire=0.04,
+        healthcare_by_age={a: 6_000.0 for a in range(65, 91)},
+        rmd_start=75, gain_fraction=0.5,
+    )
+    stream = {a: 40_000.0 for a in range(65, 91)}
+    untaxed = simulate_lifetime(ss_by_age=stream, **common)
+    taxed = simulate_lifetime(ordinary_income_by_age=stream, **common)
+    assert float(taxed.loc[90, "total"]) < float(untaxed.loc[90, "total"])
+
+
+def test_negative_ordinary_income_raises_the_cash_need():
+    """A rental running at a loss is a real cost, and must not be clamped away."""
+    base = _drawdown_only_case()
+    loss = _drawdown_only_case(
+        ordinary_income_by_age={a: -10_000.0 for a in range(65, 91)})
+    assert float(loss.loc[70, "withdrawal"]) > float(base.loc[70, "withdrawal"])
+
+
+def test_both_channels_accept_series_as_well_as_dicts():
+    ages = range(65, 91)
+    payload = dict(inflows_by_age={a: 1_000.0 for a in ages},
+                   ordinary_income_by_age={a: 5_000.0 for a in ages})
+    as_series = {k: pd.Series(v) for k, v in payload.items()}
+    pdt.assert_frame_equal(_drawdown_only_case(**payload),
+                           _drawdown_only_case(**as_series))
 
 
 # ── simulate_lifetime: edge cases + invariants ────────────────────────────────

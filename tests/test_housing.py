@@ -15,7 +15,14 @@ import pandas as pd
 import pytest
 from pandas.testing import assert_frame_equal
 
-from core.domain import housing
+from core.domain import assumptions, housing
+from core.domain.config import (
+    HousingConfig,
+    Property,
+    PropertySale,
+    Residence,
+    RetirementConfig,
+)
 
 approx = lambda v: pytest.approx(v, rel=1e-9)  # noqa: E731
 
@@ -485,6 +492,89 @@ def test_derive_real_appreciation_ignores_cpi_years_outside_the_hold():
     assert (housing.derive_real_appreciation(310_000.0, 650_000.0, 2019, 2026, wide)
             == approx(housing.derive_real_appreciation(
                 310_000.0, 650_000.0, 2019, 2026, CPI)))
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Config models (SPEC-housing Phase 2) — absent → inactive, no migration
+# ════════════════════════════════════════════════════════════════════════════
+
+def test_retirement_config_without_housing_is_valid():
+    """A config predating the housing block must load untouched."""
+    cfg = RetirementConfig(slow_go_age=75, no_go_age=85, real_return=0.05)
+    assert cfg.housing is None
+
+
+def test_housing_config_all_fields_optional():
+    """Every field optional means an empty block is legal — no migration needed."""
+    cfg = HousingConfig()
+    assert cfg.residence is None and cfg.properties is None and cfg.inflation is None
+
+
+def test_housing_config_round_trips_through_json():
+    """Firestore/dcc.Store persistence: nested models must survive a JSON hop."""
+    cfg = RetirementConfig(housing=HousingConfig(
+        residence=Residence(mode="rent", monthly_rent=2_100.0, real_rent_growth=0.0),
+        properties=[Property(
+            label="Elm St", occupancy="rental",
+            purchase_price=310_000.0, purchase_date="2019-04-01",
+            current_value=650_000.0, real_appreciation=0.01,
+            monthly_payment=2_400.0, escrow_monthly=700.0,
+            note_rate=0.0625, payoff_date="2047-07-01",
+            monthly_rent_income=3_200.0, vacancy_pct=0.08,
+            sale=PropertySale(age=70, disposition="rent", selling_cost_pct=0.07),
+        )],
+        inflation=0.025,
+    ))
+    revived = RetirementConfig.model_validate_json(cfg.model_dump_json())
+    assert revived == cfg
+    assert revived.housing.properties[0].sale.disposition == "rent"
+    assert revived.housing.residence.mode == "rent"
+
+
+def test_property_field_names_match_the_engine_kwargs():
+    """Fields mirror `core.domain.housing` kwargs so a property can be splatted in.
+
+    This is the healthcare-override pattern; if the names drift, Phase 3's
+    resolution silently loses inputs.
+    """
+    prop = Property(current_value=650_000.0, real_appreciation=0.01,
+                    monthly_payment=2_400.0, escrow_monthly=700.0,
+                    maintenance_pct=0.01)
+    kwargs = {k: v for k, v in prop.model_dump().items() if v is not None}
+    carry = housing.carrying_cost_by_age(
+        CURRENT_AGE, END_AGE, current_age=CURRENT_AGE, payoff_age=68.5,
+        inflation=0.025, **kwargs)
+    assert carry.equals(_carry()["total"])
+
+
+def test_housing_csp_keys_are_the_two_the_module_takes_over():
+    """`bills_utilities` stays in the pool; `taxes` means tax *preparation*."""
+    assert assumptions.HOUSING_CSP_KEYS == frozenset({"mortgage", "home_improvements"})
+    assert not (assumptions.HOUSING_CSP_KEYS & assumptions.HEALTHCARE_CSP_KEYS)
+    assert "bills_utilities" not in assumptions.HOUSING_CSP_KEYS
+
+
+def test_housing_keys_keep_their_phase_factors_for_unconfigured_users():
+    """They are excluded only when a housing block exists — the goldens depend
+    on the no-config path still applying the 0.95/0.90 taper."""
+    for key in assumptions.HOUSING_CSP_KEYS:
+        assert assumptions.PHASE_FACTORS[key] == {"slow_go": 0.95, "no_go": 0.90}
+
+
+def test_housing_exclusion_drops_only_those_keys_from_the_spend_pool():
+    plan = {"mortgage": 2_000.0, "home_improvements": 200.0,
+            "bills_utilities": 250.0, "groceries": 600.0}
+    labels = {k: "fixed" for k in plan}
+
+    default = assumptions.annual_spend_by_phase(plan, labels)
+    gated = assumptions.annual_spend_by_phase(
+        plan, labels,
+        exclude_keys=assumptions.HEALTHCARE_CSP_KEYS | assumptions.HOUSING_CSP_KEYS)
+
+    assert set(default["go_go"]["by_key"]) == set(plan)
+    assert set(gated["go_go"]["by_key"]) == {"bills_utilities", "groceries"}
+    # The taper still applies to what stays behind.
+    assert gated["slow_go"]["by_key"]["bills_utilities"] == approx(250.0 * 12 * 0.95)
 
 
 # ════════════════════════════════════════════════════════════════════════════

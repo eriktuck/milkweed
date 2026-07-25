@@ -104,6 +104,9 @@ def default_annual_retirement_spend(
 #     housing (sticky)  0.95 / 0.90              mortgage, bills_utilities,
 #                                                home_other, home_improvements,
 #                                                television, phone, taxes
+#                       — `mortgage` and `home_improvements` are excluded from
+#                         this pool *when the user has a housing config*; see
+#                         HOUSING_CSP_KEYS and core/domain/housing.py.
 #     transport         0.85 / 0.70              auto
 #     food              0.90 / 0.75              groceries
 #     discretionary     0.70 / 0.45              guilt_free, vacations, airbnb,
@@ -122,6 +125,21 @@ PHASES: tuple[str, ...] = ("go_go", "slow_go", "no_go")
 
 # csp keys excluded from the generic spend pool (modelled by HealthCare instead).
 HEALTHCARE_CSP_KEYS: frozenset[str] = frozenset({"medical", "health_insurance"})
+
+# csp keys excluded from the generic spend pool *only when the user has a housing
+# config*, because core/domain/housing.py then supplies them instead:
+#   * mortgage — replaced by P&I (which ends at payoff) + escrow (which does not).
+#   * home_improvements — replaced by maintenance as a % of home value, because
+#     maintenance goes to zero if you rent.
+# `bills_utilities` stays in the pool (you pay utilities either way), as does
+# `taxes`, which means tax *preparation* — property tax lives inside escrow.
+#
+# Unlike HEALTHCARE_CSP_KEYS this is NOT the default `exclude_keys`; callers pass
+# `HEALTHCARE_CSP_KEYS | HOUSING_CSP_KEYS` only when a housing block is present.
+# Both keys therefore keep their PHASE_FACTORS entries above: those rows are dead
+# for a housing-configured user and load-bearing for everyone else, whose results
+# must stay byte-identical (tests/goldens/retmath_spend_by_phase.csv pins them).
+HOUSING_CSP_KEYS: frozenset[str] = frozenset({"mortgage", "home_improvements"})
 
 # csp_key → {slow_go, no_go} multiplier (go_go implicitly 1.0).
 PHASE_FACTORS: dict[str, dict[str, float]] = {

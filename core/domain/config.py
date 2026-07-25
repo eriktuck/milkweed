@@ -9,6 +9,98 @@ from typing import Dict, List
 from pydantic import BaseModel
 
 
+class PropertySale(BaseModel):
+    """A planned sale of one property, and what happens to the household after.
+
+    Absent (or `age is None`) → no sale is modelled. `disposition` decides what
+    the proceeds and the cost stream become: "buy" puts `proceeds − new_home_price`
+    into taxable (usually negative — a portfolio draw) and switches the carry to
+    the new property; "rent" puts the full proceeds into taxable and flips
+    `Residence.mode` to rent.
+    """
+    age: int | None = None
+    disposition: str | None = None          # "buy" | "rent"
+    new_home_price: float | None = None
+    selling_cost_pct: float | None = None   # default 0.07 (housing.SELLING_COST_PCT)
+
+
+class Property(BaseModel):
+    """One piece of real property — an asset, a liability, and a cost stream.
+
+    `occupancy` selects the **tax regime**, which is the one thing a rental
+    genuinely changes (see core/domain/housing.py): a primary residence's carry is
+    a living expense and its gain gets the §121 exclusion; a rental's carry offsets
+    its rent as ordinary income, gets no exclusion, and pays 25% depreciation
+    recapture at sale. A rental is deliberately not modelled as a business entity.
+
+    Field names mirror the `core.domain.housing` kwargs so a resolved property can
+    be splatted straight in, exactly as `healthcare` overrides are.
+    """
+    label: str | None = None
+    occupancy: str | None = None            # "primary" | "rental"
+
+    # The asset
+    purchase_price: float | None = None
+    purchase_date: str | None = None        # ISO "YYYY-MM-DD"
+    current_value: float | None = None
+    # Forward assumption, *real* (above inflation). Defaults to the long-run US
+    # figure (~1%), NOT to the rate derived from this purchase — a short recent
+    # hold does not extrapolate. The derived rate is shown as context only.
+    real_appreciation: float | None = None  # default 0.01
+    land_fraction: float | None = None      # default 0.20 — non-depreciable basis
+
+    # The loan. `monthly_payment` is the total (usually PITI); `escrow_monthly` is
+    # the part of it that is property tax + insurance. Getting that split right is
+    # what lets P&I terminate at payoff while escrow carries on forever.
+    monthly_payment: float | None = None
+    escrow_monthly: float | None = None
+    note_rate: float | None = None
+    payoff_date: str | None = None          # ISO; absent → no payoff within horizon
+
+    # Ownership costs
+    maintenance_pct: float | None = None    # default 0.01 of current value per year
+
+    # Rental only
+    monthly_rent_income: float | None = None
+    vacancy_pct: float | None = None        # default 0.08 (vacancy + management)
+    real_rent_growth: float | None = None   # default 0.0 — growth *above* inflation
+
+    sale: PropertySale | None = None
+
+
+class Residence(BaseModel):
+    """Where the household actually lives — a pure cost, never an asset.
+
+    Deliberately separate from `properties`: "where you live" and "what you own"
+    are independent facts that only coincide for the common case. Someone letting
+    a house to tenants while renting an apartment has `mode="rent"` and a property
+    with `occupancy="rental"`; selling up and renting is just flipping this field.
+    """
+    mode: str | None = None                 # "own" | "rent"
+    monthly_rent: float | None = None
+    # Growth *above* inflation, so 0.0 means rent keeps pace. A raw "3% growth"
+    # input would double-count the engine's real-dollar frame. Negative = rent
+    # control.
+    real_rent_growth: float | None = None   # default 0.0
+
+
+class HousingConfig(BaseModel):
+    """Housing assumptions for the Coast page's fourth module.
+
+    Absent → the module is inactive and results are byte-identical to before it
+    existed: `mortgage` / `home_improvements` stay in the generic spend pool with
+    their PHASE_FACTORS multipliers. Present → those keys are excluded
+    (assumptions.HOUSING_CSP_KEYS) and this module supplies the cost stream
+    instead. Every field optional, so no Firestore migration is required.
+    """
+    residence: Residence | None = None
+    properties: List[Property] | None = None
+    # The engine's one and only inflation knob, and a narrow one: it deflates the
+    # fixed nominal P&I stream and the loan balance into the real-dollar frame,
+    # and nothing else reads it. See core/domain/housing.py's module docstring.
+    inflation: float | None = None          # default 0.025
+
+
 class RetirementConfig(BaseModel):
     """Retirement-page *scenario* assumptions, persisted under UserConfig.retirement.
 
@@ -71,6 +163,12 @@ class RetirementConfig(BaseModel):
     healthcare: Dict[str, float] | None = None
     # Long-term-care type selection (none | in_home | nursing); seeds ltc_annual.
     ltc_type: str | None = None
+
+    # Housing & real property — where the household lives plus 0..n properties.
+    # The first genuinely nested sub-model here (healthcare got away with a flat
+    # Dict[str, float]; housing has strings, dates and nested blocks). Absent →
+    # the module is inactive and nothing changes; see HousingConfig.
+    housing: HousingConfig | None = None
 
     # Social Security benefit at FRA (annual $), overriding the earnings/income-
     # derived estimate (e.g. typed from an SSA statement). Absent → derived.

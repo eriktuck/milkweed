@@ -66,6 +66,8 @@ def simulate_lifetime(
     healthcare_by_age: pd.Series | dict | None = None,
     rmd_start: int = 75,
     gain_fraction: float = TAXABLE_GAIN_FRACTION,
+    inflows_by_age: pd.Series | dict | None = None,
+    ordinary_income_by_age: pd.Series | dict | None = None,
 ) -> pd.DataFrame:
     """Year-by-year bucket-level projection from current_age to death_age.
 
@@ -80,6 +82,22 @@ def simulate_lifetime(
     funding each year's net living need (phase spend + healthcare − Social Security)
     after tax, withdrawing taxable → trad → roth with RMDs forced from trad at
     `rmd_start`.
+
+    Two optional channels carry money that is neither a contribution nor a
+    portfolio draw. Both are generic — housing is only their first consumer:
+
+      * `inflows_by_age` — one-time lump sums (a home sale, an inheritance, a
+        business sale) landing in **taxable** just before that year's growth.
+        They need their own hook because `cash_need` is clamped at zero, which
+        would silently clip a $500k inflow; and they work in both the
+        accumulation and drawdown legs. Any tax on the event is the caller's to
+        net out — what arrives here is proceeds.
+      * `ordinary_income_by_age` — recurring income that is **taxed** (net rental
+        income; eventually the Social Security taxation fix). Unlike `ss_by_age`,
+        which rides an untaxed channel as a documented v1 simplification, this
+        offsets the living need *and* enters the tax fixed-point alongside the
+        trad draw. A negative value (a rental running at a loss) raises the cash
+        need and shelters ordinary income, which `annual_tax` floors at zero.
 
     Returns a DataFrame indexed by `age` with the bucket balances
     (taxable/trad/roth/total), `contribution`, the drawdown flow columns
@@ -105,6 +123,8 @@ def simulate_lifetime(
     rr = float(r_retire)
     ss = as_age_lookup(ss_by_age)
     health = as_age_lookup(healthcare_by_age)
+    inflow = as_age_lookup(inflows_by_age)
+    ord_income = as_age_lookup(ordinary_income_by_age)
     gain_frac = float(gain_fraction)
 
     taxable = float(buckets.get("taxable", 0.0))
@@ -134,7 +154,7 @@ def simulate_lifetime(
         rows.append(row)
 
         ra = ra_at(age)
-        taxable = taxable * (1 + ra) + year_alloc["taxable"]
+        taxable = (taxable + inflow.get(age, 0.0)) * (1 + ra) + year_alloc["taxable"]
         trad = trad * (1 + ra) + year_alloc["trad"]
         roth = roth * (1 + ra) + year_alloc["roth"]
 
@@ -144,9 +164,11 @@ def simulate_lifetime(
         spend = float(spend_by_phase.get(spend_phase, 0.0))
         hc = health.get(age, 0.0)
         income = ss.get(age, 0.0)
+        other_ord = ord_income.get(age, 0.0)
         total_before = taxable + trad + roth
 
-        cash_need = max(spend + hc - income, 0.0)   # SS untaxed offset (v1)
+        # SS is an untaxed offset (v1); `other_ord` is spendable *and* taxed below.
+        cash_need = max(spend + hc - income - other_ord, 0.0)
         rmd = required_min_distribution(trad, age, rmd_start)
 
         # Fixed-point on tax: the draw must fund cash_need + the tax it triggers.
@@ -156,7 +178,8 @@ def simulate_lifetime(
             target = cash_need + tax
             w_taxable, w_trad, w_roth, excess_rmd, _short = allocate_withdrawals(
                 target, taxable, trad, roth, rmd)
-            ordinary_income = w_trad                 # all trad draws are ordinary
+            # All trad draws are ordinary, plus any taxed outside income.
+            ordinary_income = w_trad + other_ord
             ltcg_gain = w_taxable * gain_frac
             new_tax = annual_tax(ordinary_income, ltcg_gain)
             if abs(new_tax - tax) < 1.0:
@@ -165,7 +188,8 @@ def simulate_lifetime(
             tax = new_tax
 
         withdrawal = w_taxable + w_trad + w_roth
-        net_spend = withdrawal - tax - excess_rmd + income   # after-tax living cash
+        # After-tax living cash: draws plus both income channels.
+        net_spend = withdrawal - tax - excess_rmd + income + other_ord
 
         rows.append({
             "age": age, "total": total_before,
@@ -178,8 +202,9 @@ def simulate_lifetime(
             "life_phase": "retirement", "spend_phase": spend_phase,
         })
 
-        # Apply draws; reinvest any forced-RMD excess into taxable; then grow.
-        taxable = max(taxable - w_taxable + excess_rmd, 0.0)
+        # Apply draws; reinvest any forced-RMD excess and lump-sum inflows into
+        # taxable; then grow.
+        taxable = max(taxable - w_taxable + excess_rmd, 0.0) + inflow.get(age, 0.0)
         trad = max(trad - w_trad, 0.0)
         roth = max(roth - w_roth, 0.0)
         taxable *= (1 + rr)
