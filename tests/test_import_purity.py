@@ -20,6 +20,7 @@ CHECK = (
     "import core.domain; "
     "import core.domain.returns; "
     "import core.domain.holdings; "
+    "import core.domain.housing; "
     "assert 'firebase_admin' not in sys.modules, 'firebase_admin was imported'; "
     "assert 'core.services.firebase' not in sys.modules, "
     "'core.services.firebase was imported'; "
