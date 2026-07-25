@@ -497,6 +497,41 @@ def _housing_summary(s, block: dict) -> str:
     return " · ".join(bits)
 
 
+# ── The seed guard (why every seed_* callback carries a `-seeded-store`) ─────────
+#
+# Each seed_* callback takes `config-store` as an Input and re-hydrates its fields
+# from the saved config whenever it changes. But `config-store` is rewritten by
+# every save on this page (rate, expenses, housing, income) and by five other pages
+# (budget, settings, profile, csp). So typing into one module and saving another
+# silently reverted the first — and the next Save there persisted the reverted
+# value. It presents as "this input doesn't save".
+#
+# A whole-config comparison cannot fix it: after any save the config genuinely *has*
+# changed, so "did config-store change?" is always true. Each seed reads a different
+# slice, so the guard has to key on the slice that callback actually reads — plus
+# the uid, so switching "Viewing as" still re-seeds, and plus any other legitimate
+# trigger (`co-monthly` for the allocation, the SS inputs for the estimate), which
+# is what keeps those callbacks responsive.
+#
+# The stores are `memory`, so they live and die with the page: navigating away and
+# back re-seeds from scratch, which is how an Investments upload still lands.
+
+def _seed_changed(seeded, key, slice_name=None) -> bool:
+    """Has the config slice a seed callback reads actually moved since it last ran?
+
+    `seeded` is the callback's `-seeded-store` payload (None on first run), `key` the
+    slice it just computed. Both carry `uid`, so a "Viewing as" switch always
+    re-seeds. Pass `slice_name` to narrow the comparison to one group of outputs —
+    for the callbacks whose outputs read *different* slices, so that a change in one
+    doesn't clobber the others (see `seed_inputs`, `seed_income`).
+    """
+    if not seeded or seeded.get("uid") != key.get("uid"):
+        return True
+    if slice_name is None:
+        return seeded != key
+    return seeded.get(slice_name) != key.get(slice_name)
+
+
 def _healthcare_overrides(aca, medicare, ltc, ltc_age) -> dict:
     """The healthcare_costs_by_age kwargs build_scenario expects. oop_annual=0 because
     the per-stage totals already fold out-of-pocket in (mirrors retirement.recompute)."""
@@ -1035,9 +1070,16 @@ layout = html.Div(dbc.Container([
     # The Housing module's form, collected into one HousingConfig-shaped block so
     # `recompute` and `seed_expenses` take a single Input instead of eighteen.
     dcc.Store(id="co-housing-store", storage_type="memory"),
-    # What `seed_housing` last hydrated the form from, so an unrelated write to
-    # `config-store` cannot silently revert the user's unsaved Housing edits.
+    # What each seed_* callback last hydrated its fields from, so an unrelated write
+    # to `config-store` cannot silently revert the user's unsaved edits. One store
+    # per seed, each holding only the slice that seed reads — see `_seed_changed`.
+    dcc.Store(id="co-inputs-seeded-store", storage_type="memory"),
+    dcc.Store(id="co-exp-seeded-store", storage_type="memory"),
+    dcc.Store(id="co-hc-seeded-store", storage_type="memory"),
     dcc.Store(id="co-hsg-seeded-store", storage_type="memory"),
+    dcc.Store(id="co-inc-seeded-store", storage_type="memory"),
+    dcc.Store(id="co-alloc-seeded-store", storage_type="memory"),
+    dcc.Store(id="co-ss-seeded-store", storage_type="memory"),
     # Just `is_configured(housing)` — the expenses table's only stake in Housing.
     dcc.Store(id="co-hsg-active-store", storage_type="memory"),
     dbc.Row([
@@ -1083,10 +1125,21 @@ _module_toggle("co-inc")
     Output("co-contribution-hint", "children"),
     Output("co-meta", "children"),
     Output("co-strategy", "value"),
+    Output("co-inputs-seeded-store", "data"),
     Input("config-store", "data"),
     Input("use-case", "value"),
+    State("co-inputs-seeded-store", "data"),
 )
-def seed_inputs(config_data, use_case):
+def seed_inputs(config_data, use_case, seeded):
+    """Seed the cockpit's two primary live controls from config (Profile is the truth).
+
+    Guarded per *slice* rather than per callback (see `_seed_changed`): these are the
+    controls the user is actively dragging and typing into, and the strategy select
+    right below them is saved by this page's own rate module. A single whole-callback
+    key would mean saving the return strategy snapped the milestone slider back — the
+    exact bug the guard exists to kill. Three independent slices, three groups of
+    outputs, `no_update` for the ones whose slice didn't move.
+    """
     uid = _selected_uid(use_case)
     user_cfg = _user_cfg(config_data, uid)
     if user_cfg is None:
@@ -1120,19 +1173,37 @@ def seed_inputs(config_data, use_case):
 
     strategy = (user_cfg.get("retirement") or {}).get("return_strategy") or DEFAULT_STRATEGY
 
-    return lo, hi, marks, value, round(monthly, 2), hint, meta, strategy
+    # `lo`/`hi`/`marks`/`meta` are all functions of the ages slice, so they ride with it.
+    key = {"uid": uid, "ages": [*value, current_age, death_age, has_birth],
+           "monthly": round(monthly, 2), "strategy": strategy}
+    ages, mo, strat = (_seed_changed(seeded, key, s)
+                       for s in ("ages", "monthly", "strategy"))
+    if not (ages or mo or strat):
+        raise dash.exceptions.PreventUpdate
+
+    nu = dash.no_update
+    return (
+        lo if ages else nu, hi if ages else nu, marks if ages else nu,
+        value if ages else nu,
+        round(monthly, 2) if mo else nu, hint if mo else nu,
+        meta if ages else nu,
+        strategy if strat else nu,
+        key,
+    )
 
 
 # ── Module 2 seeds: expenses table + healthcare inputs from config ────────────────
 
 @callback(
     Output("co-exp-table", "data"),
+    Output("co-exp-seeded-store", "data"),
     Input("config-store", "data"),
     Input("use-case", "value"),
     Input("co-hsg-active-store", "data"),
     State("co-housing-store", "data"),
+    State("co-exp-seeded-store", "data"),
 )
-def seed_expenses(config_data, use_case, _active, housing):
+def seed_expenses(config_data, use_case, _active, housing, seeded):
     """Re-seed when Housing switches on or off, because that decides whether
     `mortgage` / `home_improvements` belong in this table at all (see
     `_seed_expense_rows`).
@@ -1141,14 +1212,24 @@ def seed_expenses(config_data, use_case, _active, housing):
     Housing form rewrites `co-housing-store`, and re-seeding on each one would
     discard unsaved cell edits here for no reason — only the exclusion set matters,
     and it only changes when `is_configured` flips. The block still comes in as
-    State so `spend_exclude_keys` stays the single expression of that rule."""
+    State so `spend_exclude_keys` stays the single expression of that rule.
+
+    Guarded on the seeded rows themselves (see `_seed_changed`) — they are pure and
+    cheap to recompute, and they *are* the slice this callback reads, folding the CSP
+    plan, the household share, the phase factors, the saved per-category edits and
+    the housing exclusion into one comparison. Persisted edits re-apply on top so a
+    stale re-seed was survivable here, but unsaved cell edits were not."""
     uid = _selected_uid(use_case)
     if not config_data or not isinstance(config_data, str) or not uid:
         raise dash.exceptions.PreventUpdate
     config = json.loads(config_data)
     if uid not in (config.get("users") or {}):
         raise dash.exceptions.PreventUpdate
-    return _seed_expense_rows(config, uid, housing)
+    rows = _seed_expense_rows(config, uid, housing)
+    key = {"uid": uid, "rows": rows}
+    if not _seed_changed(seeded, key):
+        raise dash.exceptions.PreventUpdate
+    return rows, key
 
 
 @callback(
@@ -1157,23 +1238,33 @@ def seed_expenses(config_data, use_case, _active, housing):
     Output("co-hc-ltc-type", "value"),
     Output("co-hc-ltc", "value"),
     Output("co-hc-ltc-age", "value"),
+    Output("co-hc-seeded-store", "data"),
     Input("config-store", "data"),
     Input("use-case", "value"),
+    State("co-hc-seeded-store", "data"),
 )
-def seed_healthcare(config_data, use_case):
+def seed_healthcare(config_data, use_case, seeded):
     """Hydrate the healthcare card from persisted RetirementConfig.healthcare/ltc_type,
-    falling back to the research-median defaults."""
-    user_cfg = _user_cfg(config_data, _selected_uid(use_case))
+    falling back to the research-median defaults.
+
+    Only when that block actually moves (see `_seed_changed`); any other write to
+    `config-store` would otherwise revert these five inputs mid-edit."""
+    uid = _selected_uid(use_case)
+    user_cfg = _user_cfg(config_data, uid)
     if user_cfg is None:
         raise dash.exceptions.PreventUpdate
     hc = ((user_cfg.get("retirement") or {}).get("healthcare")) or {}
     ltc_type = (user_cfg.get("retirement") or {}).get("ltc_type") or LTC_DEFAULT_TYPE
+    key = {"uid": uid, "hc": hc, "ltc_type": ltc_type}
+    if not _seed_changed(seeded, key):
+        raise dash.exceptions.PreventUpdate
     return (
         int(hc.get("aca_annual", _HC_ACA_DEFAULT)),
         int(hc.get("medicare_annual", _HC_MEDICARE_DEFAULT)),
         ltc_type,
         int(hc.get("ltc_annual", LTC_DEFAULT_ANNUAL)),
         int(hc.get("ltc_start_age", LTC_DEFAULT_START_AGE)),
+        key,
     )
 
 
@@ -1273,13 +1364,8 @@ def seed_housing(config_data, use_case, seeded):
     property list as "says nothing", which is what keeps an untouched form inert and
     the scenario byte-identical to before this module existed.
 
-    **Only re-seeds when the stored block actually changes.** `config-store` is
-    rewritten by every save on this page (expenses, income, rate) and by five other
-    pages; re-hydrating on each of those would blow away whatever the user has typed
-    here but not yet saved — silently, and then persist the reverted value on their
-    next Save. `co-hsg-seeded-store` remembers what was last seeded so an unrelated
-    config write is a no-op. Switching "Viewing as" still re-seeds, because the uid
-    is part of the comparison.
+    Only re-seeds when the stored block actually changes — the whole block *is* this
+    callback's slice, so the guard is a plain comparison (see `_seed_changed`).
     """
     uid = _selected_uid(use_case)
     user_cfg = _user_cfg(config_data, uid)
@@ -1460,41 +1546,68 @@ def save_housing(n, block, config_data, use_case):
     Output("co-ss-income-hint", "children"),
     Output("co-gain-frac", "value"),
     Output("co-gain-hint", "children"),
+    Output("co-inc-seeded-store", "data"),
     Input("config-store", "data"),
     Input("use-case", "value"),
+    State("co-inc-seeded-store", "data"),
 )
-def seed_income(config_data, use_case):
+def seed_income(config_data, use_case, seeded):
     """Seed current balances (from holdings), the gross-income line (from the CSP
     income plan), and the taxable-gain % (from the cost-basis report) — all editable
-    overrides (ported from pages/retirement.py seed_income)."""
+    overrides (ported from pages/retirement.py seed_income).
+
+    Two slices (see `_seed_changed`), because the outputs read two different ones:
+    balances and the gain % come from the holdings snapshot (keyed by uid +
+    `investment_accounts`), the gross-income line from the CSP income plan. Editing
+    the budget shouldn't re-seed hand-entered balances, and vice versa.
+
+    The guard deliberately sits *above* `balances_by_tax_bucket` /
+    `taxable_gain_fraction`: both hit Firestore, so a spurious re-fire cost a
+    round-trip as well as the user's typing."""
     uid = _selected_uid(use_case)
     user_cfg = _user_cfg(config_data, uid)
     if user_cfg is None:
         raise dash.exceptions.PreventUpdate
     accounts = user_cfg.get("investment_accounts")
 
-    buckets = balances_by_tax_bucket(uid, accounts)
-    bal_hint = (f"auto-filled from your holdings ({_money(buckets['total'])} total) — editable"
-                if buckets["total"] > 0 else "no holdings found — enter your current balances")
-
     active_plan = _active_plan(user_cfg)
     csp_labels = user_cfg.get("csp_labels") or {}
     annual_income = 12.0 * sum(float(a) for cat, a in active_plan.items()
                                if csp_labels.get(cat) == "income")
-    income_hint = (f"seeded from your CSP income ({_money(annual_income)}/yr) — likely net; "
-                   "enter gross for accuracy" if annual_income > 0
-                   else "enter your current gross annual income to estimate Social Security")
 
-    derived = taxable_gain_fraction(uid, accounts)
-    if derived is not None:
-        gain_pct = round(derived * 100)
-        gain_hint = f"derived from your cost-basis report ({gain_pct}% gain) — editable"
+    key = {"uid": uid, "holdings": accounts, "income": round(annual_income)}
+    held, inc = (_seed_changed(seeded, key, s) for s in ("holdings", "income"))
+    if not (held or inc):
+        raise dash.exceptions.PreventUpdate
+
+    nu = dash.no_update
+    if held:
+        buckets = balances_by_tax_bucket(uid, accounts)
+        bal_hint = (f"auto-filled from your holdings ({_money(buckets['total'])} total) — editable"
+                    if buckets["total"] > 0 else "no holdings found — enter your current balances")
+        bal_out = (round(buckets["taxable"]), round(buckets["trad"]), round(buckets["roth"]),
+                   bal_hint)
+
+        derived = taxable_gain_fraction(uid, accounts)
+        if derived is not None:
+            gain_pct = round(derived * 100)
+            gain_hint = f"derived from your cost-basis report ({gain_pct}% gain) — editable"
+        else:
+            gain_pct = int(TAXABLE_GAIN_FRACTION * 100)
+            gain_hint = "default — upload your Vanguard cost-basis CSV to derive this"
+        gain_out = (gain_pct, gain_hint)
     else:
-        gain_pct = int(TAXABLE_GAIN_FRACTION * 100)
-        gain_hint = "default — upload your Vanguard cost-basis CSV to derive this"
+        bal_out, gain_out = (nu, nu, nu, nu), (nu, nu)
 
-    return (round(buckets["taxable"]), round(buckets["trad"]), round(buckets["roth"]), bal_hint,
-            round(annual_income), income_hint, gain_pct, gain_hint)
+    if inc:
+        income_hint = (f"seeded from your CSP income ({_money(annual_income)}/yr) — likely net; "
+                       "enter gross for accuracy" if annual_income > 0
+                       else "enter your current gross annual income to estimate Social Security")
+        income_out = (round(annual_income), income_hint)
+    else:
+        income_out = (nu, nu)
+
+    return (*bal_out, *income_out, *gain_out, key)
 
 
 @callback(
@@ -1502,41 +1615,66 @@ def seed_income(config_data, use_case):
     Output("co-alloc-trad", "value"),
     Output("co-alloc-roth", "value"),
     Output("co-alloc-hint", "children"),
+    Output("co-alloc-seeded-store", "data"),
     Input("config-store", "data"),
     Input("use-case", "value"),
     Input("co-monthly", "value"),
+    State("co-alloc-seeded-store", "data"),
 )
-def seed_allocation(config_data, use_case, monthly):
+def seed_allocation(config_data, use_case, monthly, seeded):
     """Split the annual contribution tax-advantaged-first across buckets, preferring a
     persisted RetirementConfig.contribution_allocation. Re-seeds when the monthly
-    contribution changes so the split tracks it; each bucket stays editable."""
-    user_cfg = _user_cfg(config_data, _selected_uid(use_case))
+    contribution changes so the split tracks it; each bucket stays editable.
+
+    `monthly` is part of the seed key, not just an Input (see `_seed_changed`): it is
+    a legitimate trigger, so guarding on the config slice alone would freeze the
+    split at whatever contribution was on screen when the page loaded."""
+    uid = _selected_uid(use_case)
+    user_cfg = _user_cfg(config_data, uid)
     if user_cfg is None:
         raise dash.exceptions.PreventUpdate
     annual = float(monthly or 0) * 12.0
     saved = (user_cfg.get("retirement") or {}).get("contribution_allocation")
+    key = {"uid": uid, "saved": saved, "annual": annual}
+    if not _seed_changed(seeded, key):
+        raise dash.exceptions.PreventUpdate
     alloc = saved if saved else default_contribution_allocation(annual)
     hint = ("tax-advantaged-first split of your contribution — editable" if annual > 0
             else "set a monthly contribution above to split")
-    return round(alloc.get("taxable", 0)), round(alloc.get("trad", 0)), round(alloc.get("roth", 0)), hint
+    return (round(alloc.get("taxable", 0)), round(alloc.get("trad", 0)),
+            round(alloc.get("roth", 0)), hint, key)
 
 
 @callback(
     Output("co-ss-pia", "value"),
     Output("co-ss-hint", "children"),
+    Output("co-ss-seeded-store", "data"),
     Input("co-ss-income", "value"),
     Input("co-ss-emptype", "value"),
     Input("co-ss-career", "value"),
     Input("config-store", "data"),
     Input("use-case", "value"),
+    State("co-ss-seeded-store", "data"),
 )
-def estimate_ss(gross_income, employment_type, career_years, config_data, use_case):
+def estimate_ss(gross_income, employment_type, career_years, config_data, use_case, seeded):
     """Estimate the SS benefit at FRA, preferring the Profile income history
     (income_segments → top-35 PIA), else the constant-income estimate. The field
-    stays an editable SSA-statement override (ported from pages/retirement.py)."""
+    stays an editable SSA-statement override (ported from pages/retirement.py).
+
+    That override is the whole reason for the guard (see `_seed_changed`): typing the
+    figure off your SSA statement and then saving anything — here or on five other
+    pages — recomputed the estimate straight over the top of it. The three
+    legitimate Inputs are in the key alongside the Profile slice, so changing income,
+    employment type or career length still re-estimates."""
     emptype = employment_type or "W2"
-    user_cfg = _user_cfg(config_data, _selected_uid(use_case)) or {}
+    uid = _selected_uid(use_case)
+    user_cfg = _user_cfg(config_data, uid) or {}
     segments = user_cfg.get("income_segments")
+
+    key = {"uid": uid, "segments": segments, "income": gross_income,
+           "emptype": emptype, "years": career_years}
+    if not _seed_changed(seeded, key):
+        raise dash.exceptions.PreventUpdate
 
     if segments:
         earnings = segments_to_annual_income(segments)
@@ -1544,7 +1682,7 @@ def estimate_ss(gross_income, employment_type, career_years, config_data, use_ca
         n = int((earnings > 0).sum())
         hint = (f"estimated from your Profile income history ({n} year{'' if n == 1 else 's'}) — "
                 "edit on the Profile page, or type your SSA figure to override")
-        return round(pia), hint
+        return round(pia), hint, key
 
     income = _num(gross_income)
     years = int(career_years) if career_years else 35
@@ -1555,7 +1693,7 @@ def estimate_ss(gross_income, employment_type, career_years, config_data, use_ca
                 "history on the Profile page, or type your SSA figure to override")
     else:
         hint = "enter gross income, add Profile income history, or type your SSA figure"
-    return round(pia), hint
+    return round(pia), hint, key
 
 
 @callback(
