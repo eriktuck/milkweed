@@ -68,6 +68,7 @@ def simulate_lifetime(
     gain_fraction: float = TAXABLE_GAIN_FRACTION,
     inflows_by_age: pd.Series | dict | None = None,
     ordinary_income_by_age: pd.Series | dict | None = None,
+    spend_by_age: pd.Series | dict | None = None,
 ) -> pd.DataFrame:
     """Year-by-year bucket-level projection from current_age to death_age.
 
@@ -99,6 +100,13 @@ def simulate_lifetime(
         trad draw. A negative value (a rental running at a loss) raises the cash
         need and shelters ordinary income, which `annual_tax` floors at zero.
 
+    A third, `spend_by_age`, is living cost that varies by *age* rather than by
+    phase — **added to** the phase spend, not a replacement, landing in the same
+    `spend` column. Housing is its first consumer (the P&I cliff at mortgage
+    payoff cannot be expressed as a three-value phase dict), but it is deliberately
+    generic. Like the other two it carries no column of its own, so `None`
+    reproduces the prior frame exactly.
+
     Returns a DataFrame indexed by `age` with the bucket balances
     (taxable/trad/roth/total), `contribution`, the drawdown flow columns
     (spend, healthcare, income, rmd, withdrawal, w_taxable, w_trad, w_roth,
@@ -125,6 +133,7 @@ def simulate_lifetime(
     health = as_age_lookup(healthcare_by_age)
     inflow = as_age_lookup(inflows_by_age)
     ord_income = as_age_lookup(ordinary_income_by_age)
+    extra_spend = as_age_lookup(spend_by_age)
     gain_frac = float(gain_fraction)
 
     taxable = float(buckets.get("taxable", 0.0))
@@ -161,7 +170,7 @@ def simulate_lifetime(
     # ── Retirement: tax-aware drawdown (ages retirement_age … death_age) ───────────
     for age in range(retirement_age, death_age + 1):
         spend_phase = phase_for_age(age, slow_go_age, no_go_age)
-        spend = float(spend_by_phase.get(spend_phase, 0.0))
+        spend = float(spend_by_phase.get(spend_phase, 0.0)) + extra_spend.get(age, 0.0)
         hc = health.get(age, 0.0)
         income = ss.get(age, 0.0)
         other_ord = ord_income.get(age, 0.0)

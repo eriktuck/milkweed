@@ -61,6 +61,7 @@ def project_retirement(
     real_return: float,
     income_by_age: pd.Series | dict | None = None,
     healthcare_by_age: pd.Series | dict | None = None,
+    spend_by_age: pd.Series | dict | None = None,
 ) -> pd.DataFrame:
     """Year-by-year drawdown from retirement_age to death_age.  (v1 light model)
 
@@ -71,6 +72,12 @@ def project_retirement(
 
     Net withdrawal = phase living spend + healthcare − income. A negative net
     (income > cost) is reinvested (grows the balance) rather than clamped.
+
+    `spend_by_age` is living cost that varies by age rather than by phase — it is
+    **added to** the phase spend, not a replacement, and lands in the same `spend`
+    column (housing is its first consumer; see core/domain/housing.py). It carries
+    no column of its own precisely so that `None` reproduces the prior frame
+    exactly.
 
     Returns a DataFrame indexed by `age` with columns:
         total, spend, healthcare, income, withdrawal, phase
@@ -84,12 +91,13 @@ def project_retirement(
     r = float(real_return)
     income = as_age_lookup(income_by_age)
     health = as_age_lookup(healthcare_by_age)
+    extra_spend = as_age_lookup(spend_by_age)
 
     total = float(start_value)
     rows = []
     for age in range(retirement_age, death_age + 1):
         phase = phase_for_age(age, slow_go_age, no_go_age)
-        spend = float(spend_by_phase.get(phase, 0.0))
+        spend = float(spend_by_phase.get(phase, 0.0)) + extra_spend.get(age, 0.0)
         hc = health.get(age, 0.0)
         inc = income.get(age, 0.0)
         withdrawal = spend + hc - inc
@@ -150,6 +158,12 @@ def default_nest_egg_goal(
         (`healthcare_costs_by_age` with its defaults; oop folded into those totals).
       * Social Security — Profile earnings history → PIA when present, else a
         CSP-`income` constant-income estimate; 0 when neither is available.
+
+    Does **not** model housing (.planning/SPEC-housing.md): for a user with a
+    configured housing block this diverges from `build_scenario`'s goal, keeping
+    `mortgage` / `home_improvements` in the spend pool instead of taking the
+    module's cost stream. It has no app caller — the Coast page always goes
+    through `build_scenario` — so it is left as the pre-housing baseline.
 
     Pure: callers pass the deserialized config + plan dicts (no Firestore). Returns
     a non-negative goal (0 when Social Security alone covers spending).

@@ -397,6 +397,247 @@ def test_resolve_pia_direct():
     assert resolve_pia(BASE_CFG, PLAN, {}) == 0.0  # no key labeled `income`
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# Housing wiring (.planning/SPEC-housing.md, Phase 3)
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# The base fixture's household, given a house: bought 2012, $2,400/mo PITI of
+# which $700 is escrow, 6.25% note. Birth year 1984, so a payoff date of
+# 2050-01-01 is exactly age 66 — inside the retirement window, where the cliff
+# can move the goal.
+
+HOUSE = {
+    "occupancy": "primary", "label": "Elm St",
+    "purchase_price": 310_000.0, "purchase_date": "2012-04-01",
+    "current_value": 650_000.0, "real_appreciation": 0.01,
+    "monthly_payment": 2_400.0, "escrow_monthly": 700.0,
+    "note_rate": 0.0625, "payoff_date": "2050-01-01", "maintenance_pct": 0.01,
+}
+
+
+def housing_cfg(*, properties=None, **house_over) -> dict:
+    """A configured housing block: own the house, no rental, no sale by default."""
+    return {
+        "residence": {"mode": "own"},
+        "properties": (properties if properties is not None
+                       else [{**HOUSE, **house_over}]),
+        "inflation": 0.025,
+    }
+
+
+def with_housing(block) -> dict:
+    return {**BASE_CFG, "retirement": {**BASE_CFG["retirement"], "housing": block}}
+
+
+# ── the gate: absent config must change absolutely nothing ────────────────────
+
+def test_absent_housing_config_leaves_every_new_field_none():
+    """The hard constraint. `None` on all four fields IS the no-housing signal."""
+    s = build()
+    assert s.housing_by_age is None
+    assert s.rental_net_income_by_age is None
+    assert s.home_equity is None
+    assert s.sale_proceeds is None
+
+
+@pytest.mark.parametrize("block", [
+    None,
+    {},
+    {"residence": None, "properties": None, "inflation": None},  # HousingConfig()
+    {"properties": []},
+])
+def test_an_inactive_housing_block_is_still_no_housing(block):
+    """`HousingConfig()` serialises to a truthy dict of Nones. Gating on
+    truthiness would drop `mortgage` from the spend pool and supply a zero cost
+    stream — quietly cutting the goal for a user who configured nothing."""
+    s = build(cfg=with_housing(block))
+    assert s.housing_by_age is None
+    assert s.spend_by_phase["go_go"] == approx(56_400.0, rel=1e-9)   # mortgage still in
+    assert s.nest_egg_goal == approx(636030.4303070052, rel=1e-9)
+
+
+# ── the csp exclusion ─────────────────────────────────────────────────────────
+
+def test_a_configured_block_takes_the_housing_keys_out_of_the_spend_pool():
+    """`mortgage` leaves the generic pool at go-go value; the module supplies the
+    cost instead. (`home_improvements` is not in this fixture's plan.)"""
+    s = build(cfg=with_housing(housing_cfg()))
+    assert s.spend_by_phase["go_go"] == approx(56_400.0 - 12 * 2_000.0, rel=1e-9)
+    assert s.housing_by_age is not None
+    assert list(s.housing_by_age.index) == list(range(65, 91))
+
+
+def test_the_exclusion_does_not_touch_an_explicit_spend_override():
+    """When the page's expenses table drives the spend, it has already applied
+    the same exclusion (pages/coast.py::_seed_expense_rows) — build_scenario must
+    not subtract it twice."""
+    override = {"go_go": 40_000.0, "slow_go": 35_000.0, "no_go": 30_000.0}
+    s = build(cfg=with_housing(housing_cfg()), spend_by_phase=override)
+    assert s.spend_by_phase == approx(override, rel=1e-9)
+
+
+# ── Gate (a): the goal FALLS when the mortgage ends before death ──────────────
+
+def test_the_nest_egg_goal_falls_when_the_payoff_precedes_death():
+    """The spec's headline. Both scenarios are housing-configured, so the csp
+    exclusion is identical and the terminating P&I is the only variable."""
+    payoff = build(cfg=with_housing(housing_cfg(payoff_date="2050-01-01")))  # age 66
+    never = build(cfg=with_housing(housing_cfg(payoff_date=None)))
+
+    assert payoff.nest_egg_goal < never.nest_egg_goal
+    # The cliff itself: P&I is gone the year after payoff, onto the escrow +
+    # maintenance floor that outlives the loan.
+    assert float(payoff.housing_by_age.loc[66]) < float(payoff.housing_by_age.loc[65])
+    assert float(payoff.housing_by_age.loc[90]) > 0.0
+
+
+def test_the_goal_delta_is_exactly_the_pv_of_the_pi_that_ended():
+    """The backward engine is linear in the cost stream (no clamp anywhere), so
+    this identity — not just the inequality — is what proves the wiring."""
+    payoff = build(cfg=with_housing(housing_cfg(payoff_date="2050-01-01")))
+    never = build(cfg=with_housing(housing_cfg(payoff_date=None)))
+
+    pv = sum((float(never.housing_by_age.loc[a]) - float(payoff.housing_by_age.loc[a]))
+             / 1.05 ** (a - 65) for a in range(65, 91))
+    assert never.nest_egg_goal - payoff.nest_egg_goal == approx(pv, rel=1e-9)
+
+
+def test_housing_costs_land_in_the_lifetime_spend_column():
+    """No new column — that is what keeps the lifetime goldens and the
+    `shape == (49, 19)` assertion above in place."""
+    s = build(cfg=with_housing(housing_cfg()))
+    base = build()
+    assert s.lifetime.shape == base.lifetime.shape
+    assert list(s.lifetime.columns) == list(base.lifetime.columns)
+    assert float(s.lifetime.loc[70, "spend"]) == approx(
+        s.spend_by_phase["go_go"] + float(s.housing_by_age.loc[70]), rel=1e-9)
+
+
+# ── Gate (b): a sale STEPS the portfolio up ──────────────────────────────────
+
+def test_a_pre_retirement_sale_steps_the_projected_balance_up():
+    """`projected_at_retirement` is the balance *entering* retirement, so the
+    sale has to land before it. Ages 55→64 are ten growth steps."""
+    sold = build(cfg=with_housing(housing_cfg(
+        sale={"age": 55, "disposition": "rent", "monthly_rent": 2_100.0})))
+    kept = build(cfg=with_housing(housing_cfg()))
+
+    assert sold.projected_at_retirement > kept.projected_at_retirement
+    net = sold.sale_proceeds["net"]
+    assert (sold.projected_at_retirement - kept.projected_at_retirement
+            == approx(net * 1.05 ** 10, rel=1e-9))
+
+
+def test_a_post_retirement_sale_lands_in_the_walk_and_lowers_the_goal():
+    """The other side of the seam: the inflow reaches the portfolio the year
+    after the sale, and rides the unclamped `income_by_age` on the backward leg
+    so the goal drops too.
+
+    The step is not *exactly* `net · 1.05` here, and that is correct: selling the
+    home you live in also switches that year's cost stream to rent, which changes
+    the draw. The unmixed version is the test below.
+    """
+    sold = build(cfg=with_housing(housing_cfg(
+        sale={"age": 70, "disposition": "rent", "monthly_rent": 2_100.0})))
+    kept = build(cfg=with_housing(housing_cfg()))
+
+    assert sold.projected_at_retirement == approx(kept.projected_at_retirement, rel=1e-9)
+    assert float(sold.lifetime.loc[70, "total"]) == approx(
+        float(kept.lifetime.loc[70, "total"]), rel=1e-9)     # nothing before the event
+    assert (float(sold.lifetime.loc[71, "total"])
+            > float(kept.lifetime.loc[71, "total"]) + 0.9 * sold.sale_proceeds["net"])
+    assert sold.nest_egg_goal < kept.nest_egg_goal
+
+
+# A property that is neither where you live nor let to anyone: no carry, no rent.
+# Selling it moves exactly one thing — the lump sum — so the plumbing can be
+# pinned to the cent without the cost-stream switch mixed in.
+VACANT_LOT = {
+    "occupancy": "rental", "label": "Lot 7", "current_value": 400_000.0,
+    "purchase_price": 200_000.0, "purchase_date": "2010-01-01",
+    "real_appreciation": 0.01, "monthly_payment": 0.0, "escrow_monthly": 0.0,
+    "maintenance_pct": 0.0, "monthly_rent_income": 0.0, "payoff_date": None,
+}
+
+
+def test_the_inflow_alone_lands_in_taxable_before_that_years_growth():
+    sold = build(cfg=with_housing(housing_cfg(
+        properties=[HOUSE, {**VACANT_LOT, "sale": {"age": 70, "disposition": "rent"}}])))
+    kept = build(cfg=with_housing(housing_cfg(properties=[HOUSE, VACANT_LOT])))
+
+    assert float(sold.lifetime.loc[70, "total"]) == approx(
+        float(kept.lifetime.loc[70, "total"]), rel=1e-9)
+    assert (float(sold.lifetime.loc[71, "total"]) - float(kept.lifetime.loc[71, "total"])
+            == approx(sold.sale_proceeds["net"] * 1.05, rel=1e-9))
+
+
+def test_the_sale_switches_the_cost_stream_as_well_as_paying_out():
+    """Selling the home you live in and renting after is one event with two
+    effects; modelling only the proceeds would leave you paying a carry on a
+    house you no longer own."""
+    sold = build(cfg=with_housing(housing_cfg(
+        sale={"age": 70, "disposition": "rent", "monthly_rent": 2_100.0})))
+    assert float(sold.housing_by_age.loc[70]) == approx(25_200.0, rel=1e-9)
+    assert float(sold.home_equity.loc[70, "equity"]) == 0.0
+    assert sold.sale_proceeds["age"] == 70
+    assert sold.sale_proceeds["exclusion"] > 0.0     # §121, it is a primary
+
+
+# ── the rental channel ───────────────────────────────────────────────────────
+
+def test_net_rental_income_is_taxed_and_never_appears_as_a_housing_cost():
+    """The settled sign convention: a rental's carry offsets its rent (Schedule
+    E) rather than joining where-you-live, so the tax is right."""
+    s = build(cfg=with_housing(housing_cfg(properties=[
+        HOUSE,
+        {**HOUSE, "occupancy": "rental", "label": "Oak St",
+         "monthly_payment": 0.0, "escrow_monthly": 350.0, "payoff_date": None,
+         "monthly_rent_income": 3_200.0, "vacancy_pct": 0.08},
+    ])))
+    kept = build(cfg=with_housing(housing_cfg()))
+
+    # Where you live is unchanged by letting a second house to tenants...
+    assert s.housing_by_age.equals(kept.housing_by_age)
+    # ...but its net income offsets the living need AND is taxed.
+    assert float(s.rental_net_income_by_age.loc[70]) > 0.0
+    assert float(s.lifetime.loc[70, "ordinary_income"]) > float(
+        kept.lifetime.loc[70, "ordinary_income"])
+    assert float(s.lifetime.loc[70, "income"]) == approx(
+        float(kept.lifetime.loc[70, "income"]), rel=1e-9)     # `income` stays SS-only
+    assert s.nest_egg_goal < kept.nest_egg_goal
+
+
+# ── goldens ──────────────────────────────────────────────────────────────────
+
+def _housing_scenario():
+    """Own the house (payoff at 66) and let a second to tenants; sell the house
+    at 72 and rent afterwards — every Phase 3 channel active at once."""
+    return build(cfg=with_housing(housing_cfg(properties=[
+        {**HOUSE, "sale": {"age": 72, "disposition": "rent",
+                           "monthly_rent": 2_100.0}},
+        {**HOUSE, "occupancy": "rental", "label": "Oak St",
+         "current_value": 400_000.0, "purchase_price": 200_000.0,
+         "purchase_date": "2010-01-01", "monthly_payment": 0.0,
+         "escrow_monthly": 350.0, "note_rate": 0.0, "payoff_date": None,
+         "monthly_rent_income": 3_200.0, "vacancy_pct": 0.08},
+    ])))
+
+
+def test_housing_lifetime_golden():
+    _assert_frame_matches_golden(_housing_scenario().lifetime,
+                                 GOLDENS / "scenario_housing_lifetime.csv")
+
+
+def test_housing_by_age_golden():
+    _assert_series_matches_golden(_housing_scenario().housing_by_age,
+                                  GOLDENS / "scenario_housing_by_age.csv")
+
+
+def test_housing_equity_golden():
+    _assert_frame_matches_golden(_housing_scenario().home_equity,
+                                 GOLDENS / "scenario_housing_equity.csv")
+
+
 # ── golden generation (run ONCE per characterization epoch) ───────────────────
 
 def _generate_goldens() -> None:
@@ -404,21 +645,41 @@ def _generate_goldens() -> None:
 
     WARNING: run once per characterization epoch, on known-good main, then
     commit. A refactor may NEVER regenerate these — if a refactor changes the
-    numbers, the refactor is wrong.
+    numbers, the refactor is wrong. Existing files are skipped rather than
+    overwritten, so a later phase can add goldens here safely.
     """
     GOLDENS.mkdir(exist_ok=True)
     base = build()
-    base.lifetime.to_csv(GOLDENS / "scenario_base_lifetime.csv", float_format="%.17g")
-    base.ss_by_age.rename("value").to_csv(
-        GOLDENS / "scenario_base_ss_by_age.csv", float_format="%.17g",
-        index_label="age")
-    base.healthcare_by_age.rename("value").to_csv(
-        GOLDENS / "scenario_base_healthcare_by_age.csv", float_format="%.17g",
-        index_label="age")
     glide = build(return_strategy="moderate", glide_params=GLIDE_PARAMS)
-    glide.lifetime.to_csv(
-        GOLDENS / "scenario_glide_moderate_lifetime.csv", float_format="%.17g")
-    print(f"goldens written to {GOLDENS}")
+    hsg = _housing_scenario()
+
+    frames = [
+        ("scenario_base_lifetime.csv", base.lifetime),
+        ("scenario_glide_moderate_lifetime.csv", glide.lifetime),
+        ("scenario_housing_lifetime.csv", hsg.lifetime),
+        ("scenario_housing_equity.csv", hsg.home_equity.rename_axis("age")),
+    ]
+    series = [
+        ("scenario_base_ss_by_age.csv", base.ss_by_age),
+        ("scenario_base_healthcare_by_age.csv", base.healthcare_by_age),
+        ("scenario_housing_by_age.csv", hsg.housing_by_age),
+    ]
+
+    for name, df in frames:
+        path = GOLDENS / name
+        if path.exists():
+            print(f"skipping existing golden (never overwritten): {path}")
+            continue
+        df.to_csv(path, float_format="%.17g", index_label="age")
+        print(f"wrote {path} ({len(df)} rows)")
+
+    for name, s in series:
+        path = GOLDENS / name
+        if path.exists():
+            print(f"skipping existing golden (never overwritten): {path}")
+            continue
+        s.rename("value").to_csv(path, float_format="%.17g", index_label="age")
+        print(f"wrote {path} ({len(s)} rows)")
 
 
 if __name__ == "__main__":

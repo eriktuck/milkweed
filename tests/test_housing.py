@@ -521,13 +521,15 @@ def test_housing_config_round_trips_through_json():
             monthly_payment=2_400.0, escrow_monthly=700.0,
             note_rate=0.0625, payoff_date="2047-07-01",
             monthly_rent_income=3_200.0, vacancy_pct=0.08,
-            sale=PropertySale(age=70, disposition="rent", selling_cost_pct=0.07),
+            sale=PropertySale(age=70, disposition="rent", selling_cost_pct=0.07,
+                              monthly_rent=2_400.0, real_rent_growth=0.0),
         )],
         inflation=0.025,
     ))
     revived = RetirementConfig.model_validate_json(cfg.model_dump_json())
     assert revived == cfg
     assert revived.housing.properties[0].sale.disposition == "rent"
+    assert revived.housing.properties[0].sale.monthly_rent == 2_400.0
     assert revived.housing.residence.mode == "rent"
 
 
@@ -578,6 +580,312 @@ def test_housing_exclusion_drops_only_those_keys_from_the_spend_pool():
 
 
 # ════════════════════════════════════════════════════════════════════════════
+# Config → series: resolve_housing (SPEC-housing Phase 3)
+# ════════════════════════════════════════════════════════════════════════════
+#
+# The resolver's fixture is the same household as above, told as config: a house
+# bought in 2012, $2,400/mo PITI paid off in 2050, and (in the rental variants)
+# tenants at $3,200/mo. Birth year 1984 → payoff at age 66, so the P&I cliff sits
+# inside the retirement window and every splice test has something to cut.
+
+BIRTH_YEAR = 1984
+R_AGE, D_AGE, NOW = 65, 90, 42        # retirement, death, current age
+
+HOUSE_CFG = dict(
+    occupancy="primary", label="Elm St",
+    purchase_price=310_000.0, purchase_date="2012-04-01",
+    current_value=650_000.0, real_appreciation=0.01,
+    monthly_payment=2_400.0, escrow_monthly=700.0,
+    note_rate=0.0625, payoff_date="2050-01-01", maintenance_pct=0.01,
+)
+TENANTS_CFG = dict(monthly_rent_income=3_200.0, vacancy_pct=0.08)
+
+
+def _cfg(*, mode="own", properties=None, **over) -> dict:
+    return {"residence": {"mode": mode, **over.pop("residence", {})},
+            "properties": properties if properties is not None else [dict(HOUSE_CFG)],
+            "inflation": 0.025, **over}
+
+
+def _resolve(cfg, **over):
+    return housing.resolve_housing(
+        cfg, current_age=NOW, retirement_age=R_AGE, death_age=D_AGE,
+        birth_year=BIRTH_YEAR, **over)
+
+
+# ── The gate: what counts as "configured" ────────────────────────────────────
+
+@pytest.mark.parametrize("cfg", [
+    None,
+    {},
+    HousingConfig().model_dump(),                     # the all-None trap
+    {"inflation": 0.025},                             # says nothing about housing
+    {"properties": []},
+    {"properties": [{"label": "Elm St"}]},            # a name is not an economy
+])
+def test_inactive_housing_blocks_are_not_configured(cfg):
+    """`HousingConfig()` dumps to a truthy dict of Nones.
+
+    Gating on truthiness would drop `mortgage` from the spend pool AND return a
+    zero cost stream — silently cutting the goal for a user who configured
+    nothing. This is the single trap in the wiring.
+    """
+    assert housing.is_configured(cfg) is False
+    assert housing.spend_exclude_keys(cfg) == assumptions.HEALTHCARE_CSP_KEYS
+    assert _resolve(cfg) is None
+
+
+@pytest.mark.parametrize("cfg", [
+    {"residence": {"mode": "rent", "monthly_rent": 2_100.0}},
+    {"properties": [{"current_value": 650_000.0}]},
+    {"properties": [{"monthly_rent_income": 3_200.0}]},
+])
+def test_configured_blocks_take_over_the_housing_csp_keys(cfg):
+    assert housing.is_configured(cfg) is True
+    assert housing.spend_exclude_keys(cfg) == (
+        assumptions.HEALTHCARE_CSP_KEYS | assumptions.HOUSING_CSP_KEYS)
+    assert _resolve(cfg) is not None
+
+
+# ── Where you live vs what you own ───────────────────────────────────────────
+
+def test_renting_costs_rent_and_nothing_else():
+    r = _resolve({"residence": {"mode": "rent", "monthly_rent": 2_100.0}})
+    assert r.costs_by_age.loc[R_AGE] == approx(25_200.0)
+    assert r.costs_by_age.loc[D_AGE] == approx(25_200.0)      # 0% real growth
+    assert r.rental_net_income_by_age.sum() == 0.0
+    assert r.inflows_by_age == {}
+
+
+def test_owning_costs_the_primary_carry_with_the_payoff_cliff():
+    r = _resolve(_cfg())
+    # payoff_date 2050-01-01 with birth_year 1984 → age 66 exactly.
+    assert housing.age_at_date("2050-01-01", BIRTH_YEAR) == approx(66.0)
+    assert r.costs_by_age.loc[65] > r.costs_by_age.loc[66]      # the cliff
+    # Beneath it, a non-zero escrow + maintenance floor that never ends.
+    assert r.costs_by_age.loc[D_AGE] > 0.0
+    assert r.rental_net_income_by_age.sum() == 0.0
+
+
+def test_a_rentals_carry_never_appears_in_where_you_live():
+    """The settled sign convention: a rental's carry offsets its rent (Schedule
+    E), so taxing gross rent would overstate the tax by the whole carry."""
+    r = _resolve(_cfg(mode="rent", residence={"monthly_rent": 2_100.0},
+                      properties=[{**HOUSE_CFG, "occupancy": "rental", **TENANTS_CFG}]))
+    assert r.costs_by_age.loc[R_AGE] == approx(25_200.0)        # rent only
+
+    carry = housing.carrying_cost_by_age(
+        R_AGE, D_AGE, current_age=NOW, current_value=650_000.0,
+        real_appreciation=0.01, monthly_payment=2_400.0, escrow_monthly=700.0,
+        payoff_age=66.0, maintenance_pct=0.01, inflation=0.025)
+    gross = housing.rental_gross_income_by_age(
+        R_AGE, D_AGE, current_age=NOW, monthly_rent=3_200.0, vacancy_pct=0.08)
+    assert r.rental_net_income_by_age.equals(gross - carry)
+
+
+def test_a_property_with_no_stated_occupancy_is_where_you_live():
+    """Matches `sale_proceeds`' own default; a rental is the explicit choice
+    because it selects a whole tax regime."""
+    stated = _resolve(_cfg(properties=[dict(HOUSE_CFG)]))
+    implied = _resolve(_cfg(properties=[{k: v for k, v in HOUSE_CFG.items()
+                                         if k != "occupancy"}]))
+    assert implied.costs_by_age.equals(stated.costs_by_age)
+
+
+def test_the_two_windows_differ_deliberately():
+    """Costs start at retirement (before it they are already in the CSP plan);
+    equity starts today because the module's chart draws the whole path."""
+    r = _resolve(_cfg())
+    assert r.costs_by_age.index.min() == R_AGE
+    assert r.rental_net_income_by_age.index.min() == R_AGE
+    assert r.equity.index.min() == NOW
+    assert r.costs_by_age.index.max() == r.equity.index.max() == D_AGE
+
+
+def test_config_defaults_fall_back_to_the_module_constants():
+    """A sparse property still resolves: maintenance, appreciation, vacancy and
+    inflation all come from the sourced defaults."""
+    r = _resolve({"properties": [{"current_value": 500_000.0}]})
+    assert r.costs_by_age.loc[R_AGE] == approx(
+        housing.MAINTENANCE_PCT * 500_000.0
+        * (1 + housing.LONG_RUN_REAL_APPRECIATION) ** (R_AGE - NOW))
+
+
+def test_zero_is_a_real_answer_not_a_missing_one():
+    """`_opt` must not treat 0.0 as absent — a paid-off house with no escrow and
+    a user who genuinely wants 0% maintenance are both legal."""
+    r = _resolve({"properties": [{"current_value": 500_000.0, "maintenance_pct": 0.0,
+                                  "real_appreciation": 0.0}]})
+    assert r.costs_by_age.loc[R_AGE] == 0.0
+    assert r.equity.loc[R_AGE, "value"] == approx(500_000.0)
+
+
+# ── The sale: four independent effects ───────────────────────────────────────
+
+def _sold(disposition="rent", age=72, **sale):
+    return _cfg(properties=[{**HOUSE_CFG,
+                             "sale": {"age": age, "disposition": disposition, **sale}}])
+
+
+def test_sale_lump_sum_lands_in_the_year_of_the_sale():
+    r = _resolve(_sold(monthly_rent=2_100.0))
+    assert set(r.inflows_by_age) == {72}
+    assert r.inflows_by_age[72] == approx(r.sale["net"])
+    assert r.sale["exclusion"] == approx(housing.SECTION_121_EXCLUSION_MFJ)
+
+
+def test_buying_nets_the_new_home_price_out_of_the_proceeds():
+    rent = _resolve(_sold("rent", monthly_rent=2_100.0))
+    buy = _resolve(_sold("buy", new_home_price=450_000.0))
+    assert buy.inflows_by_age[72] == approx(rent.inflows_by_age[72] - 450_000.0)
+
+
+def test_a_new_home_dearer_than_the_proceeds_is_a_negative_inflow():
+    """A real portfolio draw, deliberately not clamped — clamping would hide a
+    purchase the household cannot afford."""
+    buy = _resolve(_sold("buy", new_home_price=3_000_000.0))
+    assert buy.inflows_by_age[72] < 0.0
+
+
+def test_selling_the_home_you_live_in_switches_the_cost_stream():
+    r = _resolve(_sold("rent", monthly_rent=2_100.0))
+    kept = _resolve(_cfg())
+    assert r.costs_by_age.loc[71] == approx(kept.costs_by_age.loc[71])   # before
+    assert r.costs_by_age.loc[72] == approx(25_200.0)                    # from N on
+    assert r.costs_by_age.loc[D_AGE] == approx(25_200.0)
+
+
+def test_post_move_rent_falls_back_to_the_residence_figure():
+    r = _resolve(_cfg(residence={"monthly_rent": 1_800.0},
+                      properties=[{**HOUSE_CFG,
+                                   "sale": {"age": 72, "disposition": "rent"}}]))
+    assert r.costs_by_age.loc[72] == approx(21_600.0)
+
+
+def test_buying_switches_to_a_cash_bought_home_with_scaled_escrow():
+    """The v1 inference: no new loan, escrow linear in price, this household's
+    maintenance rate on the new value."""
+    r = _resolve(_sold("buy", new_home_price=450_000.0))
+    value_at_sale = 650_000.0 * 1.01 ** (72 - NOW)
+    ratio = 450_000.0 / value_at_sale
+    expected = 700.0 * 12.0 * ratio + 0.01 * 450_000.0          # escrow + maintenance
+    assert r.costs_by_age.loc[72] == approx(expected)           # no P&I at all
+    # Maintenance rides the new home's value from the sale on.
+    assert r.costs_by_age.loc[73] == approx(
+        700.0 * 12.0 * ratio + 0.01 * 450_000.0 * 1.01)
+
+
+def test_selling_a_rental_leaves_where_you_live_alone():
+    """Rule 3 needs BOTH primary occupancy and an owned residence — otherwise
+    selling a rental would silently move the household."""
+    cfg = _cfg(mode="rent", residence={"monthly_rent": 2_100.0},
+               properties=[{**HOUSE_CFG, "occupancy": "rental", **TENANTS_CFG,
+                            "sale": {"age": 72, "disposition": "rent"}}])
+    r = _resolve(cfg)
+    assert r.costs_by_age.loc[71] == approx(25_200.0)
+    assert r.costs_by_age.loc[72] == approx(25_200.0)     # unchanged
+    # But its income stops, and its equity leaves the roll-up.
+    assert r.rental_net_income_by_age.loc[71] != 0.0
+    assert r.rental_net_income_by_age.loc[72] == 0.0
+    assert r.equity.loc[72].tolist() == [0.0, 0.0, 0.0]
+
+
+def test_equity_drops_out_at_the_sale_while_other_properties_remain():
+    r = _resolve(_cfg(properties=[
+        {**HOUSE_CFG, "sale": {"age": 72, "disposition": "rent",
+                               "monthly_rent": 2_100.0}},
+        {**HOUSE_CFG, "occupancy": "rental", "label": "Oak St",
+         "current_value": 400_000.0, "monthly_payment": 0.0,
+         "escrow_monthly": 350.0, "payoff_date": None, **TENANTS_CFG},
+    ]))
+    assert r.equity.loc[71, "value"] > r.equity.loc[72, "value"]
+    assert r.equity.loc[72, "value"] > 0.0          # the rental is still owned
+    assert r.rental_net_income_by_age.loc[D_AGE] != 0.0
+
+
+def test_a_sale_already_in_the_past_is_ignored():
+    """Those proceeds are already inside the buckets the caller passed in."""
+    assert _resolve(_sold(age=NOW - 5)).inflows_by_age == {}
+
+
+def test_a_sale_before_retirement_still_pays_out_and_sets_the_whole_window():
+    """The inflow fires in the accumulation leg; the cost window opens already
+    post-sale, so the splice covers every age in it."""
+    r = _resolve(_sold("rent", age=55, monthly_rent=2_100.0))
+    assert set(r.inflows_by_age) == {55}
+    assert r.costs_by_age.tolist() == [approx(25_200.0)] * len(r.costs_by_age)
+
+
+def _rental_sold(*, second_rental=False, **over):
+    """Sell the rental (no §121, so the gain is actually taxable) at 72."""
+    props = [{**HOUSE_CFG, "occupancy": "rental", **TENANTS_CFG,
+              "sale": {"age": 72, "disposition": "rent"}}]
+    if second_rental:
+        props.append({**HOUSE_CFG, "occupancy": "rental", "label": "Oak St",
+                      "monthly_payment": 0.0, "escrow_monthly": 350.0,
+                      "payoff_date": None, **TENANTS_CFG})
+    return _resolve(_cfg(mode="rent", residence={"monthly_rent": 2_100.0},
+                         properties=props), **over)
+
+
+def test_capital_gains_stack_on_the_ordinary_income_of_the_sale_year():
+    """The gain is the *marginal* effect on that year's return, not a flat rate,
+    so income the household still collects that year raises the tax on the sale.
+
+    A rental is the case where this shows: no §121 exclusion, so there is a
+    taxable gain to stack — and 25% recapture on top, which is the number that
+    surprises people.
+    """
+    alone = _rental_sold()
+    assert alone.sale["exclusion"] == 0.0
+    assert alone.sale["recapture_tax"] > 0.0
+    assert alone.sale["capital_gains_tax"] > 0.0
+
+    # A second rental still collecting rent that year stacks under the gain...
+    assert (_rental_sold(second_rental=True).sale["capital_gains_tax"]
+            > alone.sale["capital_gains_tax"])
+    # ...and so does the caller's own ordinary income.
+    assert (_rental_sold(other_ordinary_income_at_sale=400_000.0)
+            .sale["capital_gains_tax"] > alone.sale["capital_gains_tax"])
+
+
+def test_the_sold_rentals_own_income_does_not_stack_under_its_gain():
+    """Its rent stops at the sale, so it is not income of that year — which is
+    why the netting runs before the proceeds are computed."""
+    assert _rental_sold().rental_net_income_by_age.loc[72] == 0.0
+
+
+def test_resolved_sale_splice_golden(goldens_dir):
+    """The whole Phase 3 resolution in one legible frame: the P&I cliff, the sale
+    splice, the rental that outlives it."""
+    actual = _resolved_sale_splice()
+    golden = _read_golden(goldens_dir / "housing_resolved_sale_splice.csv",
+                          index_col="age")
+    assert_frame_equal(actual, golden, rtol=1e-9)
+
+
+def _resolved_sale_splice() -> pd.DataFrame:
+    """Own a house with a payoff at 66 and let another to tenants; sell the house
+    at 72 and rent afterwards."""
+    r = _resolve(_cfg(residence={"monthly_rent": 2_100.0}, properties=[
+        {**HOUSE_CFG, "sale": {"age": 72, "disposition": "rent",
+                               "monthly_rent": 2_100.0}},
+        {**HOUSE_CFG, "occupancy": "rental", "label": "Oak St",
+         "current_value": 400_000.0, "purchase_price": 200_000.0,
+         "purchase_date": "2010-01-01", "monthly_payment": 0.0,
+         "escrow_monthly": 350.0, "note_rate": 0.0, "payoff_date": None,
+         **TENANTS_CFG},
+    ]))
+    return pd.DataFrame({
+        "housing_cost": r.costs_by_age,
+        "rental_net": r.rental_net_income_by_age,
+        "value": r.equity["value"].loc[R_AGE:],
+        "balance": r.equity["balance"].loc[R_AGE:],
+        "equity": r.equity["equity"].loc[R_AGE:],
+    }).rename_axis("age")
+
+
+# ════════════════════════════════════════════════════════════════════════════
 # Golden generation — run ONCE per characterization epoch.
 # WARNING: a refactor phase may NEVER regenerate these goldens; they pin the
 # behavior of current main. `uv run python -m tests.test_housing`
@@ -591,10 +899,15 @@ def _generate_goldens() -> None:
     for name, df in [
         ("housing_primary_carry_62_90.csv", _carry().rename_axis("age")),
         ("housing_own_and_rent_out_62_90.csv", _own_and_rent_out()),
+        ("housing_resolved_sale_splice.csv", _resolved_sale_splice()),
     ]:
         path = GOLDENS_DIR / name
+        # Skip rather than abort: later phases add goldens to this file, and a
+        # hard exit on the first existing one would make them unwritable. An
+        # existing golden is still NEVER overwritten — that is the whole rule.
         if path.exists():
-            raise SystemExit(f"REFUSING to overwrite existing golden: {path}")
+            print(f"skipping existing golden (never overwritten): {path}")
+            continue
         df.to_csv(path, float_format="%.17g")
         print(f"wrote {path} ({len(df)} rows)")
 

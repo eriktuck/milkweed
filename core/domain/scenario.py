@@ -16,7 +16,11 @@ It does **not** introduce new math. It orchestrates:
     tax-aware drawdown);
   * the CoastFIRE quantities — `accumulation.coast_target` and the closed-form
     `accumulation.required_monthly_contribution` (glide-path variants in
-    `glide`).
+    `glide`);
+  * housing — `housing.resolve_housing` turns a stored `HousingConfig` into a
+    cost stream, a taxed rental channel and a sale lump sum, all of which feed
+    both legs (.planning/SPEC-housing.md). The resolution doubles as the gate on
+    excluding the `mortgage` / `home_improvements` csp keys.
 
 Pure: callers pass deserialized config dicts and the current `buckets` (read from
 the holdings snapshot at the page edge via `investments.balances_by_tax_bucket`).
@@ -56,6 +60,7 @@ from core.domain.drawdown import (
     project_retirement,
 )
 from core.domain.healthcare import healthcare_costs_by_age
+from core.domain.housing import resolve_housing, spend_exclude_keys
 from core.domain.rmd import rmd_start_age
 from core.domain.social_security import resolve_pia, social_security_income
 
@@ -111,6 +116,16 @@ class Scenario:
     # CAGR when a glide is active, so existing readers see one rate either way.
     return_strategy: str | None = None       # aggressive|moderate|conservative, else None (flat rate)
     equity_glide: dict | None = None         # {age: equity weight} for the glide-path viz, else None
+
+    # ── housing & real property (.planning/SPEC-housing.md, Phase 3) ──────────
+    # All four are None when no housing block is configured, and that None is
+    # the gate itself: it is exactly the case in which `mortgage` /
+    # `home_improvements` stay in the generic spend pool with their 0.95/0.90
+    # taper and every number here is what it was before the module existed.
+    housing_by_age: pd.Series | None = None            # where you live, annual real $
+    rental_net_income_by_age: pd.Series | None = None  # taxed ordinary channel; may be < 0
+    home_equity: pd.DataFrame | None = None            # value/balance/equity by age
+    sale_proceeds: dict | None = None                  # itemized sale, else None
 
     on_track: bool = field(init=False)
 
@@ -213,15 +228,31 @@ def build_scenario(
              else ret_cfg.get("contribution_allocation")
              or default_contribution_allocation(annual))
 
+    # ── housing (.planning/SPEC-housing.md) ──
+    # Resolved BEFORE the spend block, because the resolution *is* the gate: a
+    # configured block both excludes the `mortgage` / `home_improvements` csp
+    # keys from the generic pool and supplies the cost stream that replaces
+    # them. `None` (no block, or a block that says nothing) leaves both alone,
+    # which is what keeps every user without housing byte-identical.
+    housing_cfg = ret_cfg.get("housing")
+    hsg = resolve_housing(housing_cfg, current_age=current_age,
+                          retirement_age=retirement_age, death_age=death_age,
+                          birth_year=birth_year)
+    housing_costs = hsg.costs_by_age if hsg else None
+    rental_net = hsg.rental_net_income_by_age if hsg else None
+    inflows = hsg.inflows_by_age if hsg else None
+
     # ── spend / healthcare / Social Security (the backward inputs) ──
     # The Coast Expenses module passes edited per-phase annual totals; otherwise the
     # spend is derived from the CSP plan × research phase factors (the default path,
-    # identical to default_nest_egg_goal).
+    # identical to default_nest_egg_goal). The page seeds that table through the same
+    # `spend_exclude_keys` helper, so both paths drop the same keys.
     if spend_by_phase is not None:
         spend = {p: float(spend_by_phase.get(p, 0.0)) for p in PHASES}
     else:
         phase_factors = resolve_phase_factors(ret_cfg)
-        by_phase = annual_spend_by_phase(active_plan, csp_labels, phase_factors)
+        by_phase = annual_spend_by_phase(active_plan, csp_labels, phase_factors,
+                                         exclude_keys=spend_exclude_keys(housing_cfg))
         spend = {p: by_phase[p]["total"] for p in PHASES}
 
     hc_overrides = healthcare_overrides if healthcare_overrides is not None else (
@@ -240,9 +271,19 @@ def build_scenario(
     # ── backward-from-spending goal (same pipeline as default_nest_egg_goal) ──
     # Discount at the retirement-leg return (the held terminal allocation) — for a
     # flat rate that is just the single rate, unchanged.
+    # This leg has no tax model, so net rental income and a sale ride the same
+    # untaxed channel Social Security does (the documented v1 simplification);
+    # the forward walk below taxes both properly. `project_retirement` never
+    # clamps its net withdrawal, so a post-retirement sale correctly *lowers*
+    # the goal instead of being silently dropped.
+    goal_income = ss if hsg is None else ss.add(
+        rental_net, fill_value=0.0).add(
+        pd.Series(inflows, dtype="float64"), fill_value=0.0)
+
     stream = project_retirement(
         0.0, retirement_age, death_age, spend, slow_go_age, no_go_age, r_retire,
-        income_by_age=ss, healthcare_by_age=hc,
+        income_by_age=goal_income, healthcare_by_age=hc,
+        spend_by_age=housing_costs,
     )
     goal = max(nest_egg_goal(stream, r_retire), 0.0)
 
@@ -256,6 +297,8 @@ def build_scenario(
         r_accum=r_accum_arg, r_retire=r_retire,
         ss_by_age=ss, healthcare_by_age=hc,
         rmd_start=rmd_start, gain_fraction=gain_fraction,
+        spend_by_age=housing_costs, ordinary_income_by_age=rental_net,
+        inflows_by_age=inflows,
     )
 
     # ── CoastFIRE quantities (flat rate: accumulation.coast_target; glide: the
@@ -294,4 +337,8 @@ def build_scenario(
         projected_at_retirement=projected_at_retirement,
         return_strategy=strategy,
         equity_glide={int(k): float(v) for k, v in equity_glide.items()} if equity_glide else None,
+        housing_by_age=housing_costs,
+        rental_net_income_by_age=rental_net,
+        home_equity=hsg.equity if hsg else None,
+        sale_proceeds=hsg.sale if hsg else None,
     )

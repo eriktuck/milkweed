@@ -647,6 +647,60 @@ def test_nest_egg_goal():
     assert drawdown.nest_egg_goal(pd.DataFrame(), 0.05) == 0.0
 
 
+# ── spend_by_age: the age-indexed cost channel (SPEC-housing Phase 3) ─────────
+
+@pytest.mark.parametrize("extra", [
+    None,                                       # explicit None
+    {},                                         # empty map
+    {a: 0.0 for a in range(65, 91)},            # explicit zeros
+    pd.Series({a: 0.0 for a in range(65, 91)}, dtype="float64"),
+])
+def test_project_retirement_spend_by_age_is_a_no_op_when_unset(extra):
+    """The hard constraint: absent housing config must change nothing.
+
+    `x + 0.0` is bit-identical for every finite float, which is what keeps
+    tests/goldens/retmath_project_retirement.csv from moving.
+    """
+    assert_frame_equal(
+        drawdown.project_retirement(
+            1_500_000.0, 65, 90, SPEND_BY_PHASE, 75, 85, 0.05,
+            income_by_age=_ss_series(), healthcare_by_age=_hc_series(),
+            spend_by_age=extra),
+        _projection(),
+    )
+
+
+def test_project_retirement_spend_by_age_adds_to_the_phase_spend():
+    """It is *added to* the phase spend, not a replacement — and it lands in the
+    existing `spend` column, so no column is added to the frame."""
+    extra = {a: 12_000.0 for a in range(65, 91)}
+    proj = drawdown.project_retirement(
+        1_500_000.0, 65, 90, SPEND_BY_PHASE, 75, 85, 0.05,
+        income_by_age=_ss_series(), healthcare_by_age=_hc_series(),
+        spend_by_age=extra)
+    base = _projection()
+
+    assert list(proj.columns) == list(base.columns)
+    for age in (65, 75, 85, 90):
+        assert proj.loc[age, "spend"] == approx(base.loc[age, "spend"] + 12_000.0)
+        assert proj.loc[age, "withdrawal"] == approx(base.loc[age, "withdrawal"] + 12_000.0)
+
+
+def test_spend_by_age_raises_the_goal_by_exactly_its_pv():
+    """The backward engine is linear in the cost stream (no clamp anywhere), so
+    the goal delta is the PV of the added stream — the identity Phase 3's
+    housing gate relies on."""
+    extra = {a: 12_000.0 for a in range(65, 91)}
+    proj = drawdown.project_retirement(
+        1_500_000.0, 65, 90, SPEND_BY_PHASE, 75, 85, 0.05,
+        income_by_age=_ss_series(), healthcare_by_age=_hc_series(),
+        spend_by_age=extra)
+
+    pv = sum(12_000.0 / 1.05 ** (a - 65) for a in range(65, 91))
+    assert (drawdown.nest_egg_goal(proj, 0.05)
+            - drawdown.nest_egg_goal(_projection(), 0.05)) == approx(pv)
+
+
 def test_retirement_summary():
     """Headline BAN numbers for the standard projection."""
     summ = drawdown.retirement_summary(_projection(), 0.05)

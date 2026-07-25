@@ -24,11 +24,13 @@ tax lives inside escrow here.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date
 from datetime import datetime as dt
 
 import pandas as pd
 
+from core.domain.assumptions import HEALTHCARE_CSP_KEYS, HOUSING_CSP_KEYS
 from core.domain.taxes import annual_tax
 
 # ── Asset & carrying-cost defaults ───────────────────────────────────────────
@@ -497,3 +499,350 @@ def derive_real_appreciation(purchase_price: float, current_value: float,
                 cum_inflation *= 1.0 + float(inflation.loc[year])
 
     return ((p1 / p0) / cum_inflation) ** (1.0 / n) - 1.0
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 9. Config → series (the wiring edge)
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Everything above is numeric and age-indexed. This section is the single edge
+# where a stored `HousingConfig` becomes those numbers: ISO dates become ages
+# (`age_at_date`), a residence/property list fans out into "where you live" vs
+# "what you own", and a planned sale becomes a splice plus a lump sum. Keeping
+# it here rather than in `scenario.py` honours that module's promise to
+# orchestrate rather than introduce math, and lets the splice be tested against
+# plain dicts instead of a whole Scenario.
+
+# Fields that make a property block mean something. A `Property` with only a
+# label (or none at all) is not a configuration — see `is_configured`.
+_MEANINGFUL_PROPERTY_FIELDS: tuple[str, ...] = (
+    "current_value", "purchase_price", "monthly_payment", "escrow_monthly",
+    "monthly_rent_income",
+)
+
+
+@dataclass(frozen=True)
+class ResolvedHousing:
+    """Everything `build_scenario` needs from a `HousingConfig`, as series.
+
+    Three channels, deliberately separate because the engine treats them
+    differently (and because netting them would get the tax wrong):
+
+      * `costs_by_age` — where you live, a positive cost, rides the spend channel.
+      * `rental_net_income_by_age` — rent less that property's carry, **taxed**
+        ordinary income. May be negative; that is a real result, not an error.
+      * `inflows_by_age` — a sale, an event rather than a series, landing in the
+        taxable bucket.
+
+    `equity` and `sale` are for display (the Phase 4 chart and the Phase 5
+    breakdown table); nothing in the engine reads them.
+    """
+    costs_by_age: pd.Series              # where you live — the spend channel
+    rental_net_income_by_age: pd.Series  # the taxed ordinary channel; may be < 0
+    inflows_by_age: dict[int, float]     # {sale age: net proceeds to the portfolio}
+    equity: pd.DataFrame                 # value / balance / equity, all properties
+    sale: dict | None                    # itemized proceeds + age/label/disposition
+
+
+def is_configured(housing_cfg: dict | None) -> bool:
+    """True when the housing block actually says something.  (pure)
+
+    The trap this exists for: `HousingConfig()` dumps to a dict of all-Nones,
+    which is truthy. Gating on truthiness would drop `mortgage` and
+    `home_improvements` from the generic spend pool *and* hand back a zero cost
+    stream — silently cutting the nest-egg goal for a user who configured
+    nothing. A block counts only if it names where you live or describes at
+    least one property in economic terms.
+    """
+    cfg = housing_cfg or {}
+    if (cfg.get("residence") or {}).get("mode"):
+        return True
+    return any(
+        any(prop.get(f) is not None for f in _MEANINGFUL_PROPERTY_FIELDS)
+        for prop in (cfg.get("properties") or [])
+        if prop
+    )
+
+
+def spend_exclude_keys(housing_cfg: dict | None) -> frozenset[str]:
+    """csp keys the generic spend pool must drop for this user.  (pure)
+
+    Healthcare always; housing only when a block is configured — a user without
+    housing keeps the `mortgage` / `home_improvements` rows and their 0.95/0.90
+    PHASE_FACTORS taper, exactly as before this module existed. This is the one
+    expression of that rule; `scenario.build_scenario` and the Coast page's
+    expense-table seed both call it so the two cannot drift.
+    """
+    if is_configured(housing_cfg):
+        return HEALTHCARE_CSP_KEYS | HOUSING_CSP_KEYS
+    return HEALTHCARE_CSP_KEYS
+
+
+def _opt(value, default: float) -> float:
+    """Config value with a code-side default, treating 0.0 as a real answer."""
+    return default if value is None else float(value)
+
+
+def _occupancy(prop: dict) -> str:
+    """A property with no stated occupancy is the home you live in.
+
+    Matches `sale_proceeds`' own default and the overwhelmingly common case of
+    one house; a rental is the deliberate, explicit choice because it selects a
+    whole tax regime.
+    """
+    return str(prop.get("occupancy") or "primary")
+
+
+def _carry_kwargs(prop: dict, *, birth_year: int | None, inflation: float) -> dict:
+    """The `carrying_cost_by_age` kwargs for one property (no `note_rate`)."""
+    return dict(
+        current_value=float(prop.get("current_value") or 0.0),
+        real_appreciation=_opt(prop.get("real_appreciation"), LONG_RUN_REAL_APPRECIATION),
+        monthly_payment=float(prop.get("monthly_payment") or 0.0),
+        escrow_monthly=float(prop.get("escrow_monthly") or 0.0),
+        payoff_age=age_at_date(prop.get("payoff_date"), birth_year),
+        maintenance_pct=_opt(prop.get("maintenance_pct"), MAINTENANCE_PCT),
+        inflation=inflation,
+    )
+
+
+def _rent_kwargs(prop: dict) -> dict:
+    """The rental-income kwargs for one property let to tenants."""
+    return dict(
+        monthly_rent=float(prop.get("monthly_rent_income") or 0.0),
+        vacancy_pct=_opt(prop.get("vacancy_pct"), VACANCY_PCT),
+        real_rent_growth=_opt(prop.get("real_rent_growth"), DEFAULT_REAL_RENT_GROWTH),
+    )
+
+
+def _new_home_kwargs(prop: dict, value_at_sale: float, new_price: float | None, *,
+                     inflation: float) -> dict:
+    """Carrying cost of the home bought with the sale proceeds.  (v1 rule)
+
+    `PropertySale` carries only a price, so the rest is inferred. The purchase is
+    **cash** — the spec's `proceeds − new price` spends the whole price, so there
+    is no new loan and no P&I. Escrow scales with price (property tax is ad
+    valorem; insurance tracks replacement cost) and this household's maintenance
+    rate and appreciation assumption carry over. A missing price is a
+    like-for-like move.
+
+    Assumes: no mortgage on the new home, escrow linear in price, the same real
+    appreciation, no buy-side closing costs, and no fresh §121 clock (which only
+    matters for a second sale, not modelled in v1).
+    """
+    price = float(new_price or 0.0) or float(value_at_sale)
+    ratio = (price / value_at_sale) if value_at_sale else 1.0
+    return dict(
+        current_value=price,
+        real_appreciation=_opt(prop.get("real_appreciation"), LONG_RUN_REAL_APPRECIATION),
+        monthly_payment=0.0,
+        escrow_monthly=float(prop.get("escrow_monthly") or 0.0) * ratio,
+        payoff_age=None,
+        maintenance_pct=_opt(prop.get("maintenance_pct"), MAINTENANCE_PCT),
+        inflation=inflation,
+    )
+
+
+def _splice(pre: pd.Series, post: pd.Series, sale_age: int | None) -> pd.Series:
+    """`pre` before `sale_age`, `post` from `sale_age` on (shared index)."""
+    if sale_age is None:
+        return pre
+    return pre.where(pre.index < int(sale_age), post)
+
+
+def _zero_from(series_or_frame, sale_age: int | None):
+    """Zero every row from `sale_age` on — the property is no longer owned."""
+    if sale_age is None:
+        return series_or_frame
+    keep = pd.Series(series_or_frame.index < int(sale_age),
+                     index=series_or_frame.index)
+    if isinstance(series_or_frame, pd.DataFrame):
+        return series_or_frame.where(keep, 0.0, axis=0)
+    return series_or_frame.where(keep, 0.0)
+
+
+def _sale_age(prop: dict, current_age: int) -> int | None:
+    """The planned sale age, or None if there isn't one we can model.
+
+    A sale in the past is ignored rather than back-dated: the proceeds are
+    already in the portfolio the caller passed in.
+    """
+    sale = prop.get("sale") or {}
+    age = sale.get("age")
+    if age is None:
+        return None
+    age = int(age)
+    return age if age >= int(current_age) else None
+
+
+def resolve_housing(
+    housing_cfg: dict | None,
+    *,
+    current_age: int,
+    retirement_age: int,
+    death_age: int,
+    birth_year: int | None,
+    other_ordinary_income_at_sale: float = 0.0,
+) -> ResolvedHousing | None:
+    """`HousingConfig` → the cost stream, the rental channel, the sale.  (pure)
+
+    Returns **None** when the block says nothing (`is_configured`). That None is
+    the single gate `build_scenario` reads: no resolution → no csp exclusion →
+    byte-identical results for every user without housing.
+
+    Two windows, deliberately different. The cost and rental series span
+    `retirement_age … death_age` — before retirement the property's economics are
+    already in the CSP plan (carrying costs are budgeted, rent carries the
+    `income` label, and the contribution lever is net of both), so adding them
+    would double-count. `equity` spans `current_age … death_age` because the
+    module's chart draws the whole path.
+
+    A sale has four independent effects, and separating them is what stops
+    selling a rental from silently changing where you live:
+
+      1. net proceeds (less a new home's price, if buying) land in `inflows_by_age`;
+      2. a rental's net income stops;
+      3. the cost stream switches — but only if the sold property is the one you
+         live in (`occupancy == "primary"` *and* `residence.mode == "own"`);
+      4. that property leaves the equity roll-up.
+
+    `other_ordinary_income_at_sale` stacks the capital gain on the household's
+    other ordinary income for that year, so the gains tax is marginal rather than
+    flat. Any rental income the household still collects that year is added
+    internally. Passing the true figure needs the forward walk's trad draw, which
+    depends on the sale — a two-pass fixed point, deferred; v1 callers pass 0.0.
+    """
+    if not is_configured(housing_cfg):
+        return None
+
+    cfg = housing_cfg or {}
+    anchor = int(current_age)
+    start, end = int(retirement_age), int(death_age)
+    inflation = _opt(cfg.get("inflation"), DEFAULT_INFLATION)
+
+    residence = cfg.get("residence") or {}
+    mode = str(residence.get("mode") or "own")
+    properties = [p for p in (cfg.get("properties") or []) if p]
+
+    cost_index = pd.Index(range(start, end + 1))
+    # Named because `equity` is the one result that leaves here as a DataFrame —
+    # the module chart and its golden both index it by age.
+    equity_index = pd.Index(range(anchor, end + 1), name="age")
+
+    # ── 2 & 4: per-property rental income and equity, each ending at its own sale
+    rental_net = pd.Series(0.0, index=cost_index, dtype="float64")
+    equity = pd.DataFrame(0.0, index=equity_index,
+                          columns=["value", "balance", "equity"], dtype="float64")
+
+    for prop in properties:
+        sold_at = _sale_age(prop, anchor)
+        carry = _carry_kwargs(prop, birth_year=birth_year, inflation=inflation)
+
+        if _occupancy(prop) == "rental":
+            net = rental_net_income_by_age(start, end, current_age=anchor,
+                                           **carry, **_rent_kwargs(prop))
+            rental_net = rental_net.add(_zero_from(net, sold_at), fill_value=0.0)
+
+        eq = equity_by_age(anchor, end, note_rate=float(prop.get("note_rate") or 0.0),
+                           **{k: v for k, v in carry.items() if k != "maintenance_pct"})
+        equity = equity.add(_zero_from(eq, sold_at), fill_value=0.0)
+
+    # ── 1: the sale itself. Gains stack on the ordinary income the household
+    # still has that year — which is why this runs after the rental netting.
+    inflows: dict[int, float] = {}
+    sale_detail: dict | None = None
+
+    for prop in properties:
+        sold_at = _sale_age(prop, anchor)
+        if sold_at is None:
+            continue
+        sale = prop.get("sale") or {}
+        other = (float(other_ordinary_income_at_sale)
+                 + max(float(rental_net.get(sold_at, 0.0)), 0.0))
+        proceeds = sale_proceeds(
+            sold_at, current_age=anchor, occupancy=_occupancy(prop),
+            current_value=float(prop.get("current_value") or 0.0),
+            real_appreciation=_opt(prop.get("real_appreciation"),
+                                   LONG_RUN_REAL_APPRECIATION),
+            purchase_price=float(prop.get("purchase_price") or 0.0),
+            purchase_age=age_at_date(prop.get("purchase_date"), birth_year),
+            land_fraction=_opt(prop.get("land_fraction"), LAND_FRACTION),
+            monthly_payment=float(prop.get("monthly_payment") or 0.0),
+            escrow_monthly=float(prop.get("escrow_monthly") or 0.0),
+            note_rate=float(prop.get("note_rate") or 0.0),
+            payoff_age=age_at_date(prop.get("payoff_date"), birth_year),
+            inflation=inflation,
+            selling_cost_pct=_opt(sale.get("selling_cost_pct"), SELLING_COST_PCT),
+            other_ordinary_income=other,
+        )
+        # Buying replaces part (or more) of the proceeds. A price above the
+        # proceeds is a NEGATIVE inflow — a real portfolio draw, deliberately not
+        # clamped: hiding it would hide a purchase the household cannot afford.
+        new_price = (float(sale.get("new_home_price") or 0.0)
+                     if str(sale.get("disposition")) == "buy" else 0.0)
+        inflows[sold_at] = inflows.get(sold_at, 0.0) + proceeds["net"] - new_price
+
+        detail = {**proceeds, "age": sold_at, "label": prop.get("label"),
+                  "disposition": sale.get("disposition"),
+                  "new_home_price": new_price or None}
+        if sale_detail is None or _occupancy(prop) == "primary":
+            sale_detail = detail
+
+    # ── 3: where you live, and the switch if you sell it ──────────────────────
+    primary = next((p for p in properties if _occupancy(p) == "primary"), None)
+    costs = housing_costs_by_age(
+        start, end, current_age=anchor, residence_mode=mode,
+        monthly_rent=float(residence.get("monthly_rent") or 0.0),
+        real_rent_growth=_opt(residence.get("real_rent_growth"),
+                              DEFAULT_REAL_RENT_GROWTH),
+        primary=(_carry_kwargs(primary, birth_year=birth_year, inflation=inflation)
+                 if primary else None),
+    )
+
+    if mode == "own" and primary is not None:
+        sold_at = _sale_age(primary, anchor)
+        if sold_at is not None:
+            costs = _splice(costs, _post_sale_costs(
+                primary, sold_at, start, end,
+                residence=residence, anchor=anchor, inflation=inflation,
+            ), sold_at)
+
+    return ResolvedHousing(
+        costs_by_age=costs,
+        rental_net_income_by_age=rental_net,
+        inflows_by_age=inflows,
+        equity=equity,
+        sale=sale_detail,
+    )
+
+
+def _post_sale_costs(prop: dict, sale_age: int, start: int, end: int, *,
+                     residence: dict, anchor: int, inflation: float) -> pd.Series:
+    """Where you live *after* selling the home you lived in.  (pure, age-indexed)
+
+    Both dispositions quote their inputs in today's dollars and apply them from
+    the sale age on, so the series is anchored at `sale_age`, not at the current
+    age — which is exactly why `carrying_cost_by_age` keeps its anchor separate
+    from its window. Post-move rent falls back to `Residence.monthly_rent` when
+    the sale doesn't name its own.
+    """
+    sale = prop.get("sale") or {}
+    if str(sale.get("disposition")) == "buy":
+        value_at_sale = (float(prop.get("current_value") or 0.0)
+                         * (1.0 + _opt(prop.get("real_appreciation"),
+                                       LONG_RUN_REAL_APPRECIATION)) ** (sale_age - anchor))
+        return carrying_cost_by_age(
+            start, end, current_age=sale_age,
+            **_new_home_kwargs(prop, value_at_sale, sale.get("new_home_price"),
+                               inflation=inflation))
+
+    rent = sale.get("monthly_rent")
+    growth = sale.get("real_rent_growth")
+    return housing_costs_by_age(
+        start, end, current_age=sale_age, residence_mode="rent",
+        monthly_rent=float((rent if rent is not None
+                            else residence.get("monthly_rent")) or 0.0),
+        real_rent_growth=_opt(growth if growth is not None
+                              else residence.get("real_rent_growth"),
+                              DEFAULT_REAL_RENT_GROWTH),
+    )

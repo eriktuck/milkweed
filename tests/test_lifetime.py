@@ -301,10 +301,13 @@ def test_lifetime_empty_glide_map_means_zero_rate():
 @pytest.mark.parametrize("case", [_accum_only_case, _drawdown_only_case,
                                   _full_walk_case])
 @pytest.mark.parametrize("payload", [
-    {"inflows_by_age": None, "ordinary_income_by_age": None},           # explicit None
-    {"inflows_by_age": {}, "ordinary_income_by_age": {}},               # empty map
+    {"inflows_by_age": None, "ordinary_income_by_age": None,            # explicit None
+     "spend_by_age": None},
+    {"inflows_by_age": {}, "ordinary_income_by_age": {},                # empty map
+     "spend_by_age": {}},
     {"inflows_by_age": {a: 0.0 for a in range(40, 93)},                 # explicit zeros
-     "ordinary_income_by_age": {a: 0.0 for a in range(40, 93)}},
+     "ordinary_income_by_age": {a: 0.0 for a in range(40, 93)},
+     "spend_by_age": {a: 0.0 for a in range(40, 93)}},
 ])
 def test_new_channels_are_no_ops_when_unset(case, payload):
     """The hard constraint: absent housing config must change nothing, anywhere.
@@ -383,10 +386,42 @@ def test_negative_ordinary_income_raises_the_cash_need():
 def test_both_channels_accept_series_as_well_as_dicts():
     ages = range(65, 91)
     payload = dict(inflows_by_age={a: 1_000.0 for a in ages},
-                   ordinary_income_by_age={a: 5_000.0 for a in ages})
+                   ordinary_income_by_age={a: 5_000.0 for a in ages},
+                   spend_by_age={a: 3_000.0 for a in ages})
     as_series = {k: pd.Series(v) for k, v in payload.items()}
     pdt.assert_frame_equal(_drawdown_only_case(**payload),
                            _drawdown_only_case(**as_series))
+
+
+def test_spend_by_age_adds_to_the_phase_spend_without_adding_a_column():
+    """Age-indexed living cost lands in the existing `spend` column.
+
+    Carrying no column of its own is what keeps the lifetime goldens (and
+    tests/test_scenario.py's `shape == (49, 19)`) in place.
+    """
+    base = _drawdown_only_case()
+    df = _drawdown_only_case(spend_by_age={a: 15_000.0 for a in range(65, 91)})
+
+    assert list(df.columns) == list(base.columns)
+    assert set(df.columns) == set(LIFETIME_COLS)
+    assert float(df.loc[70, "spend"]) == pytest.approx(
+        float(base.loc[70, "spend"]) + 15_000.0, rel=1e-12)
+    # More spend → a bigger draw → a smaller surviving balance.
+    assert float(df.loc[70, "withdrawal"]) > float(base.loc[70, "withdrawal"])
+    assert float(df.loc[80, "total"]) < float(base.loc[80, "total"])
+
+
+def test_spend_by_age_only_applies_in_the_retirement_leg():
+    """Accumulation rows have no living need to fund — the module's series start
+    at retirement_age, mirroring healthcare."""
+    base = _full_walk_case()
+    df = _full_walk_case(spend_by_age={a: 20_000.0 for a in range(50, 93)})
+    for age in range(50, 67):
+        assert float(df.loc[age, "spend"]) == 0.0
+        assert float(df.loc[age, "total"]) == pytest.approx(
+            float(base.loc[age, "total"]), rel=1e-12)
+    assert float(df.loc[67, "spend"]) == pytest.approx(
+        float(base.loc[67, "spend"]) + 20_000.0, rel=1e-12)
 
 
 # ── simulate_lifetime: edge cases + invariants ────────────────────────────────

@@ -23,6 +23,15 @@ class PropertySale(BaseModel):
     new_home_price: float | None = None
     selling_cost_pct: float | None = None   # default 0.07 (housing.SELLING_COST_PCT)
 
+    # What renting after a "rent" disposition costs — quoted in today's dollars and
+    # applied from the sale age on. Deliberately its own pair rather than reusing
+    # `Residence.monthly_rent`, which means "what you pay *now*": a household that
+    # owns today has no current rent, and one that already rents would see its
+    # present rent silently become its post-move rent. Falls back to
+    # `Residence.monthly_rent` when absent.
+    monthly_rent: float | None = None
+    real_rent_growth: float | None = None   # default 0.0 — growth *above* inflation
+
 
 class Property(BaseModel):
     """One piece of real property — an asset, a liability, and a cost stream.

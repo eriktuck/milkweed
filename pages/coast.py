@@ -25,6 +25,7 @@ from dash import Input, Output, State, callback, dash_table, dcc, html
 from flask import session
 
 from core.domain.budget import get_active_csp_plan
+from core.domain.housing import spend_exclude_keys
 from core.domain.social_security import segments_to_annual_income
 from core.domain.assumptions import (
     DEFAULT_PHASE_FACTOR,
@@ -283,7 +284,13 @@ def _seed_expense_rows(config, uid) -> list[dict]:
     user_cfg = (config.get("users") or {}).get(uid) or {}
     active_plan, csp_labels, _share = _effective_expense_plan(config, uid)
     factors = resolve_phase_factors(user_cfg.get("retirement"))
-    by_phase = annual_spend_by_phase(active_plan, csp_labels, factors)
+    # These rows are fed straight back into build_scenario as `spend_by_phase=`,
+    # which bypasses its own gating — so the exclusion has to happen here too, via
+    # the same helper. Without it a housing-configured user double-counts the
+    # mortgage: once in this table, once from the Housing module.
+    by_phase = annual_spend_by_phase(
+        active_plan, csp_labels, factors,
+        exclude_keys=spend_exclude_keys((user_cfg.get("retirement") or {}).get("housing")))
     saved = (user_cfg.get("retirement") or {}).get("expenses") or {}
 
     rows = []
