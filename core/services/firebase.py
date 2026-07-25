@@ -303,6 +303,11 @@ RETIREMENT_FIELDS = (
     "pia_annual",
     "gain_fraction",
     "contribution_allocation",
+    # Housing & real property (.planning/SPEC-housing.md). A nested map, unlike
+    # every other entry here — the Coast module always writes it in full (explicit
+    # nulls for cleared fields), because Firestore's merge=True deep-merges nested
+    # maps and an omitted key would otherwise linger from a previous save.
+    "housing",
 )
 
 

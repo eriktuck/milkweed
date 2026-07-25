@@ -348,6 +348,52 @@ def test_housing_costs_owning_with_no_property_is_zero():
     assert list(c.index) == list(range(62, 91))
 
 
+# ════════════════════════════════════════════════════════════════════════════
+# housing_costs_breakdown — the itemization the Coast module charts (Phase 4)
+# ════════════════════════════════════════════════════════════════════════════
+
+@pytest.mark.parametrize("kwargs", [
+    pytest.param(APARTMENT, id="rent"),
+    pytest.param({"residence_mode": "own", "primary": HOUSE}, id="own"),
+    pytest.param({"residence_mode": "own"}, id="own-nothing"),
+])
+def test_the_breakdown_total_is_housing_costs_by_age(kwargs):
+    """`housing_costs_by_age` IS the breakdown's `total` column — bit-identical,
+    not merely close, so the engine's cost stream and the module's chart can
+    never disagree."""
+    bd = housing.housing_costs_breakdown(
+        CURRENT_AGE, END_AGE, current_age=CURRENT_AGE, **kwargs)
+    total = housing.housing_costs_by_age(
+        CURRENT_AGE, END_AGE, current_age=CURRENT_AGE, **kwargs)
+    assert bd["total"].equals(total)
+    assert list(bd.columns) == list(housing.HOUSING_COST_COMPONENTS) + ["total"]
+
+
+def test_the_breakdown_separates_the_cliff_from_the_floor():
+    """Owning fills the three ownership components and nothing else; the P&I
+    column is the only one that ever reaches zero."""
+    bd = housing.housing_costs_breakdown(
+        CURRENT_AGE, END_AGE, current_age=CURRENT_AGE,
+        residence_mode="own", primary=HOUSE)
+    carry = _carry()
+
+    for col in ("pi", "escrow", "maintenance"):
+        assert bd[col].equals(carry[col])
+    assert (bd["rent"] == 0.0).all()
+    assert bd.loc[68, "pi"] > 0.0                    # payoff is midway through 68
+    assert bd.loc[69, "pi"] == 0.0
+    assert bd.loc[90, "escrow"] > 0.0                # the floor outlives the loan
+    assert bd.loc[90, "maintenance"] > 0.0
+
+
+def test_the_breakdown_puts_rent_in_its_own_column():
+    """Renting is the mirror image — one column, no ownership components."""
+    bd = housing.housing_costs_breakdown(
+        CURRENT_AGE, END_AGE, current_age=CURRENT_AGE, **APARTMENT)
+    assert bd.loc[70, "rent"] == approx(2_100.0 * 12)
+    assert bd[["pi", "escrow", "maintenance"]].abs().sum().sum() == 0.0
+
+
 def test_own_and_rent_out_golden(goldens_dir):
     """The author's case end to end: rent an apartment, let one house to tenants."""
     actual = _own_and_rent_out()

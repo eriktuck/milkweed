@@ -20,12 +20,22 @@ from datetime import date
 
 import dash
 import dash_bootstrap_components as dbc
+import pandas as pd
 import plotly.graph_objects as go
 from dash import Input, Output, State, callback, dash_table, dcc, html
 from flask import session
 
 from core.domain.budget import get_active_csp_plan
-from core.domain.housing import spend_exclude_keys
+from core.domain.housing import (
+    DEFAULT_INFLATION,
+    DEFAULT_REAL_RENT_GROWTH,
+    LONG_RUN_REAL_APPRECIATION,
+    MAINTENANCE_PCT,
+    VACANCY_PCT,
+    derive_real_appreciation,
+    is_configured,
+    spend_exclude_keys,
+)
 from core.domain.social_security import segments_to_annual_income
 from core.domain.assumptions import (
     DEFAULT_PHASE_FACTOR,
@@ -79,6 +89,19 @@ _C_TOTAL = "#444444"       # total value line
 _C_WORKING = "#3b82f6"
 _C_TRAD = "#8b5cf6"        # violet — tax-deferred
 _C_ROTH = "#14b8a6"        # teal — Roth
+
+# Housing module. The asset reads as portfolio-blue, the debt as a muted grey
+# beneath it, and the gap between them (equity) picks up the growth green.
+_C_HOUSE_VALUE = "#5b7ec9"
+_C_HOUSE_DEBT = "#9aa5b1"
+# Cost components, in stacking order: the permanent floor first, the terminating
+# P&I on top of it, so the payoff cliff visibly lands on something.
+_HOUSING_COST_TRACES = (
+    ("escrow", "Escrow (tax + insurance)", "#b9c9e8", "rgba(185,201,232,0.75)"),
+    ("maintenance", "Maintenance", "#d6b38a", "rgba(214,179,138,0.65)"),
+    ("pi", "Principal & interest", _C_HOUSE_VALUE, "rgba(91,126,201,0.55)"),
+    ("rent", "Rent", "#7fb3f5", "rgba(127,179,245,0.55)"),
+)
 
 # Faint per-asset-class lines on the rate-of-return chart (equities, then bonds);
 # colours are muted so the bold CAGR line leads. Cash is omitted — the scenario forces
@@ -157,6 +180,13 @@ def _money_input(id_, **kw):
     """$-prefixed numeric input (mirrors pages/retirement.py)."""
     return dbc.InputGroup([dbc.InputGroupText("$"),
                            dbc.Input(id=id_, type="number", size="sm", **kw)], size="sm")
+
+
+def _pct_input(id_, **kw):
+    """%-suffixed numeric input (the shape already inlined for co-gain-frac and
+    the phase-scale inputs; the Housing module needs seven of them)."""
+    return dbc.InputGroup([dbc.Input(id=id_, type="number", size="sm", **kw),
+                           dbc.InputGroupText("%")], size="sm")
 
 
 def _bucket_inputs(prefix, step):
@@ -269,9 +299,15 @@ def _effective_expense_plan(config, uid):
     return plan, labels, share
 
 
-def _seed_expense_rows(config, uid) -> list[dict]:
+def _seed_expense_rows(config, uid, housing_cfg=None) -> list[dict]:
     """One editable monthly row per living-expense csp key, seeded from the CSP plan
     (go-go) × research multipliers (slow-go/no-go), with saved edits applied on top.
+
+    `housing_cfg` is the *live* Housing-module form state (None → the persisted
+    block). It has to be threaded in because these rows are fed straight back to
+    `build_scenario` as `spend_by_phase=`, which bypasses its own gate: without it,
+    switching Housing on would double-count the mortgage — once here, once from the
+    module — until the user saved and reloaded.
 
     The plan folds in this individual's share of household shared expenses (see
     `_effective_expense_plan`) — only individuals retire, so household costs are
@@ -288,9 +324,11 @@ def _seed_expense_rows(config, uid) -> list[dict]:
     # which bypasses its own gating — so the exclusion has to happen here too, via
     # the same helper. Without it a housing-configured user double-counts the
     # mortgage: once in this table, once from the Housing module.
+    housing = (housing_cfg if housing_cfg is not None
+               else (user_cfg.get("retirement") or {}).get("housing"))
     by_phase = annual_spend_by_phase(
         active_plan, csp_labels, factors,
-        exclude_keys=spend_exclude_keys((user_cfg.get("retirement") or {}).get("housing")))
+        exclude_keys=spend_exclude_keys(housing))
     saved = (user_cfg.get("retirement") or {}).get("expenses") or {}
 
     rows = []
@@ -327,6 +365,136 @@ def _seed_expense_rows(config, uid) -> list[dict]:
                 out.append(_group_header_row(label))
         out.append(r)
     return out
+
+
+# ── Housing module helpers (.planning/SPEC-housing.md, Phase 4) ──────────────────
+
+# Percent-valued form fields, shown as whole percents and stored as fractions.
+_HSG_PCT_DEFAULTS = {
+    "rent_growth": DEFAULT_REAL_RENT_GROWTH,
+    "prop_rent_growth": DEFAULT_REAL_RENT_GROWTH,
+    "appreciation": LONG_RUN_REAL_APPRECIATION,
+    "maintenance": MAINTENANCE_PCT,
+    "vacancy": VACANCY_PCT,
+    "inflation": DEFAULT_INFLATION,
+}
+
+
+def _blank(v):
+    """A cleared numeric input → None, so it round-trips as "unset" rather than 0.
+
+    Deliberately not `_num`: zero is a real answer (a paid-off house has no
+    payment) and must be distinguishable from an empty box.
+    """
+    return None if v in (None, "") else float(v)
+
+
+def _from_pct(v):
+    """Whole-percent input → fraction, preserving the blank/None distinction."""
+    v = _blank(v)
+    return None if v is None else v / 100.0
+
+
+def _to_pct(v, default: float):
+    """Stored fraction (or its code-side default) → whole percent for the form."""
+    return round((default if v is None else float(v)) * 100.0, 4)
+
+
+def _housing_from_form(mode, rent, rent_growth, has_prop, occupancy, label,
+                       payment, escrow, note_rate, payoff,
+                       price, purchase_date, value, appreciation, maintenance,
+                       rent_income, vacancy, prop_rent_growth, inflation) -> dict:
+    """The Housing form as a `HousingConfig`-shaped dict.  (pure)
+
+    Always returns the complete block, including explicit `None`s — that is what
+    makes a cleared field actually clear in Firestore, whose `merge=True`
+    deep-merges nested maps (see RETIREMENT_FIELDS in core/services/firebase.py).
+    Emptiness is not decided here: `housing.is_configured` is the single gate, so
+    an untouched form resolves to nothing and leaves the scenario byte-identical.
+
+    A property is written as a one-element list; multi-property is a later UI
+    iteration, not a config-shape change.
+    """
+    prop = {
+        "label": label or None,
+        "occupancy": occupancy or "primary",
+        "purchase_price": _blank(price),
+        "purchase_date": purchase_date or None,
+        "current_value": _blank(value),
+        "real_appreciation": _from_pct(appreciation),
+        "land_fraction": None,
+        "monthly_payment": _blank(payment),
+        "escrow_monthly": _blank(escrow),
+        "note_rate": _from_pct(note_rate),
+        "payoff_date": payoff or None,
+        "maintenance_pct": _from_pct(maintenance),
+        "monthly_rent_income": _blank(rent_income) if occupancy == "rental" else None,
+        "vacancy_pct": _from_pct(vacancy) if occupancy == "rental" else None,
+        "real_rent_growth": (_from_pct(prop_rent_growth) if occupancy == "rental"
+                             else None),
+        "sale": None,   # Phase 5 owns the sale inputs
+    }
+    return {
+        "residence": {
+            "mode": mode or None,
+            "monthly_rent": _blank(rent),
+            "real_rent_growth": _from_pct(rent_growth),
+        },
+        "properties": [prop] if has_prop else [],
+        "inflation": _from_pct(inflation),
+    }
+
+
+def _housing_block(user_cfg) -> dict:
+    """The persisted housing block for a user (never None)."""
+    return ((user_cfg or {}).get("retirement") or {}).get("housing") or {}
+
+
+def _first_property(block: dict) -> dict:
+    props = [p for p in (block.get("properties") or []) if p]
+    return props[0] if props else {}
+
+
+def _housing_summary(s, block: dict) -> str:
+    """The module's collapsed one-line summary.
+
+    Reads the resolved scenario rather than the form, so it states what the
+    numbers above are actually doing. The sale clause the spec sketches
+    ("sell at 70 → +$512k") arrives with the Phase 5 sale inputs.
+    """
+    if s.housing_by_age is None or s.housing_by_age.empty:
+        return "not modelled — the mortgage stays in your expenses"
+
+    res = block.get("residence") or {}
+    prop = _first_property(block)
+    mode = res.get("mode")
+    if mode == "own" and not prop:
+        return "owning, but no home entered — housing costs are $0"
+    if mode == "rent" and not res.get("monthly_rent"):
+        return "renting, but no rent entered — housing costs are $0"
+
+    # Monthly figures stay unabbreviated — "$2,100/mo" reads as a real payment,
+    # "$2K/mo" does not. Balances keep `_money`'s abbreviation.
+    per_mo = lambda v: f"${v:,.0f}/mo"  # noqa: E731
+
+    # Read from the chart frame's first row — TODAY, not retirement. The summary
+    # should agree with the left edge of the chart the user is looking at.
+    now = s.housing_breakdown.iloc[0]
+    bits = [f"{'Rent' if mode == 'rent' else 'Own'} {per_mo(float(now['total']) / 12)}"]
+
+    if str(prop.get("occupancy")) == "rental":
+        bits.append("1 rental")
+    if s.home_equity is not None and not s.home_equity.empty:
+        equity = float(s.home_equity["equity"].iloc[0])
+        if equity:
+            bits.append(f"{_money(equity)} equity")
+
+    # The headline for anyone who owns a rental: what the two net to. "Ahead"
+    # means what you own more than pays for where you live.
+    if round(float(now["rental_net"])):
+        net = float(now["net"]) / 12
+        bits.append(f"{per_mo(abs(net))} {'net' if net > 0 else 'ahead'}")
+    return " · ".join(bits)
 
 
 def _healthcare_overrides(aca, medicare, ltc, ltc_age) -> dict:
@@ -606,7 +774,180 @@ _expenses_module = _module(
 )
 
 
-# ── Assumption module 3: Income & tax planning ───────────────────────────────────
+# ── Assumption module 3: Housing & real property ─────────────────────────────────
+#
+# Placed between expenses and income: it is a spending assumption, and it took the
+# `mortgage` / `home_improvements` rows out of the table directly above it.
+
+def _hsg_field(label, control, hint=None, width=None):
+    """A labelled Housing input with an optional muted hint beneath."""
+    return dbc.Col([
+        dbc.Label(label, className="small text-muted mb-1"),
+        control,
+        html.Small(hint, className="text-muted d-block mt-1") if hint else None,
+    ], **({"lg": width} if width else {}))
+
+
+_housing_module = _module(
+    "co-hsg", "fa-house", "Housing & real property", "co-hsg-summary",
+    body=[
+        html.P([
+            "Housing is the one expense that ", html.B("ends on a known date"),
+            " — and the one that is also an asset. Describe where you live and what "
+            "you own, and the mortgage comes out of the expense table above and is "
+            "modelled properly here: principal & interest stop at payoff, escrow and "
+            "maintenance carry on forever. Everything is in today's dollars.",
+        ], className="text-muted small mb-3"),
+
+        # ── Where you live ───────────────────────────────────────────────────────
+        html.Div([html.B("Where you live"),
+                  html.Span(" — a pure cost", className="text-muted small ms-1")],
+                 className="mb-2"),
+        dbc.Row([
+            dbc.Col(dbc.RadioItems(
+                id="co-hsg-mode", value=None, inline=True,
+                options=[{"label": "I own my home", "value": "own"},
+                         {"label": "I rent", "value": "rent"}],
+                className="small", inputClassName="me-1", labelClassName="me-3 mb-0",
+            ), width="auto", className="d-flex align-items-center"),
+        ], className="g-2 mb-2"),
+        dbc.Row([
+            _hsg_field("Rent, $/mo", _money_input("co-hsg-rent", min=0, step=50),
+                       "What you pay to live where you live. Required — this is "
+                       "your entire housing cost when you rent.", width=3),
+            _hsg_field("Rent growth above inflation", _pct_input(
+                "co-hsg-rent-growth", step=0.25),
+                "0% means rent keeps pace with inflation; negative models rent control.",
+                width=4),
+        ], id="co-hsg-rent-row", className="g-3 mb-2"),
+        # Leaving this blank silently zeroes the entire cost stream while still
+        # pulling `mortgage` out of the expense table — the one way this module
+        # can quietly understate the nest-egg goal. Say it loudly.
+        html.Div(id="co-hsg-rent-warning", className="mb-3"),
+
+        html.Hr(className="my-3"),
+
+        # ── What you own ─────────────────────────────────────────────────────────
+        html.Div([
+            html.Div([html.B("What you own"),
+                      html.Span(" — an asset, a loan, and a cost stream",
+                                className="text-muted small ms-1")]),
+            dbc.Switch(id="co-hsg-has-prop", value=False, className="mb-0",
+                       label="I own a property"),
+        ], className="d-flex justify-content-between align-items-center mb-2"),
+
+        html.Div([
+            dbc.Row([
+                _hsg_field("What it is", dbc.Select(
+                    id="co-hsg-occupancy", size="sm", value="primary",
+                    options=[{"label": "The home I live in", "value": "primary"},
+                             {"label": "Let to tenants (rental)", "value": "rental"}]),
+                    "A rental is a tax regime, not a business: its carrying costs "
+                    "offset its rent as ordinary income.", width=4),
+                _hsg_field("Nickname (optional)", dbc.Input(
+                    id="co-hsg-label", type="text", size="sm",
+                    placeholder="e.g. Elm St"), width=3),
+            ], className="g-3 mb-3"),
+
+            html.P("The loan", className="small fw-bold mb-2"),
+            dbc.Row([
+                _hsg_field("Total monthly payment, $/mo",
+                           _money_input("co-hsg-payment", min=0, step=50),
+                           "Usually PITI — the whole thing you pay the servicer.",
+                           width=3),
+                _hsg_field("…of which escrow, $/mo",
+                           _money_input("co-hsg-escrow", min=0, step=25), width=3),
+                _hsg_field("Note rate", _pct_input("co-hsg-note-rate", min=0, step=0.125),
+                           width=2),
+                _hsg_field("Paid off on", dbc.Input(id="co-hsg-payoff", type="date",
+                                                    size="sm"), width=3),
+            ], className="g-3 mb-1"),
+            dbc.Alert([html.I(className="fas fa-circle-info me-2"),
+                       html.B("Escrow keeps being paid after payoff"),
+                       " — only the principal & interest ends. Property tax tracks "
+                       "assessed value and insurance tracks replacement cost, so both "
+                       "carry on forever. Splitting the payment correctly is what puts "
+                       "the payoff cliff at the right height."],
+                      color="light", className="small py-2 mb-3"),
+
+            html.P("The asset", className="small fw-bold mb-2"),
+            dbc.Row([
+                _hsg_field("Current value, $",
+                           _money_input("co-hsg-value", min=0, step=5000), width=3),
+                _hsg_field("Purchase price, $",
+                           _money_input("co-hsg-price", min=0, step=5000), width=3),
+                _hsg_field("Purchased on", dbc.Input(id="co-hsg-purchase-date",
+                                                     type="date", size="sm"), width=3),
+            ], className="g-3 mb-2"),
+            dbc.Row([
+                _hsg_field("Appreciation above inflation",
+                           _pct_input("co-hsg-appreciation", step=0.25), width=3),
+                dbc.Col(html.Small(id="co-hsg-appr-hint", className="text-muted"),
+                        className="d-flex align-items-center"),
+            ], className="g-3 mb-2"),
+            dbc.Row([
+                _hsg_field("Maintenance, % of value/yr",
+                           _pct_input("co-hsg-maintenance", min=0, step=0.25),
+                           "Replaces your home-improvements budget line, which is "
+                           "excluded from the expense table above. Goes to zero if "
+                           "you rent.", width=4),
+            ], className="g-3 mb-3"),
+
+            html.Div(id="co-hsg-rental-block", children=[
+                html.P("Rented out", className="small fw-bold mb-2"),
+                dbc.Row([
+                    _hsg_field("Rent collected, $/mo",
+                               _money_input("co-hsg-rent-income", min=0, step=50),
+                               width=3),
+                    _hsg_field("Vacancy & management",
+                               _pct_input("co-hsg-vacancy", min=0, step=1), width=3),
+                    _hsg_field("Rent growth above inflation",
+                               _pct_input("co-hsg-prop-rent-growth", step=0.25),
+                               width=3),
+                ], className="g-3 mb-2"),
+                html.Small("Rent less this property's carrying costs is ordinary "
+                           "income (Schedule E) and is taxed as such. It can go "
+                           "negative in a carry-heavy year — that is a real result.",
+                           className="text-muted d-block mb-3"),
+            ]),
+        ], id="co-hsg-property-block"),
+
+        dbc.Row([
+            _hsg_field("Inflation (deflates the fixed payment only)",
+                       _pct_input("co-hsg-inflation", min=0, step=0.25),
+                       "The model works in today's dollars, so a nominally fixed "
+                       "principal & interest payment shrinks in real terms every "
+                       "year. This is the only place inflation is read.", width=4),
+        ], className="g-3 mb-3"),
+
+        html.Hr(className="my-3"),
+
+        # ── The charts — the whole argument for the module in two images ─────────
+        html.P("What you own — home value, the loan beneath it, and the equity gap",
+               className="text-muted small mb-2"),
+        dcc.Loading(dcc.Graph(id="co-hsg-equity-chart",
+                              config={"displayModeBar": False}), type="circle"),
+        html.P([
+            "What it costs — what you pay to live somewhere above the line, what a "
+            "property you let out pays you below it, and the net in bold. ",
+            html.B("Where the bold line drops below zero, what you own is paying for "
+                   "where you live."),
+            " Principal & interest falls away at payoff onto the escrow and "
+            "maintenance floor that never ends.",
+        ], className="text-muted small mt-3 mb-2"),
+        dcc.Loading(dcc.Graph(id="co-hsg-cost-chart",
+                              config={"displayModeBar": False}), type="circle"),
+
+        html.Div([
+            dbc.Button("Save housing", id="co-hsg-save", color="primary", size="sm",
+                       outline=True),
+            html.Span(id="co-hsg-save-status", className="small ms-2"),
+        ], className="mt-3"),
+    ],
+)
+
+
+# ── Assumption module 4: Income & tax planning ───────────────────────────────────
 
 _income_module = _module(
     "co-inc", "fa-landmark", "Income & tax planning", "co-inc-summary",
@@ -691,6 +1032,14 @@ layout = html.Div(dbc.Container([
     # Network-bound returns analytics (yfinance/CPI), computed once per visit and
     # kept off the recompute hot path (mirrors Forecast's fc-returns-store).
     dcc.Store(id="co-returns-store", storage_type="memory"),
+    # The Housing module's form, collected into one HousingConfig-shaped block so
+    # `recompute` and `seed_expenses` take a single Input instead of eighteen.
+    dcc.Store(id="co-housing-store", storage_type="memory"),
+    # What `seed_housing` last hydrated the form from, so an unrelated write to
+    # `config-store` cannot silently revert the user's unsaved Housing edits.
+    dcc.Store(id="co-hsg-seeded-store", storage_type="memory"),
+    # Just `is_configured(housing)` — the expenses table's only stake in Housing.
+    dcc.Store(id="co-hsg-active-store", storage_type="memory"),
     dbc.Row([
         dbc.Col(html.H1("Coast"), width="auto"),
         dbc.Col(html.Span(id="co-meta", className="text-muted small"),
@@ -709,6 +1058,7 @@ layout = html.Div(dbc.Container([
             style={"fontSize": ".72rem", "letterSpacing": ".1em"}),
     _rate_module,
     _expenses_module,
+    _housing_module,
     _income_module,
     html.P([html.I(className="fas fa-circle-info me-1"),
             "Editing any assumption re-runs the scenario above — the chart and BANs "
@@ -720,6 +1070,7 @@ layout = html.Div(dbc.Container([
 
 _module_toggle("co-rr")
 _module_toggle("co-exp")
+_module_toggle("co-hsg")
 _module_toggle("co-inc")
 
 
@@ -778,15 +1129,26 @@ def seed_inputs(config_data, use_case):
     Output("co-exp-table", "data"),
     Input("config-store", "data"),
     Input("use-case", "value"),
+    Input("co-hsg-active-store", "data"),
+    State("co-housing-store", "data"),
 )
-def seed_expenses(config_data, use_case):
+def seed_expenses(config_data, use_case, _active, housing):
+    """Re-seed when Housing switches on or off, because that decides whether
+    `mortgage` / `home_improvements` belong in this table at all (see
+    `_seed_expense_rows`).
+
+    Gated on the on/off flip, not on the block itself: every keystroke in the
+    Housing form rewrites `co-housing-store`, and re-seeding on each one would
+    discard unsaved cell edits here for no reason — only the exclusion set matters,
+    and it only changes when `is_configured` flips. The block still comes in as
+    State so `spend_exclude_keys` stays the single expression of that rule."""
     uid = _selected_uid(use_case)
     if not config_data or not isinstance(config_data, str) or not uid:
         raise dash.exceptions.PreventUpdate
     config = json.loads(config_data)
     if uid not in (config.get("users") or {}):
         raise dash.exceptions.PreventUpdate
-    return _seed_expense_rows(config, uid)
+    return _seed_expense_rows(config, uid, housing)
 
 
 @callback(
@@ -883,7 +1245,211 @@ def save_expenses(n, rows, hc_aca, hc_medicare, ltc_type, hc_ltc, hc_ltc_age,
     return json.dumps(cfg), dbc.Badge("Saved", color="success", className="ms-1")
 
 
-# ── Module 3 seeds: balances, allocation, Social Security income, gain % ──────────
+# ── Module 3 (Housing): seed, reveal, collect, hint, save ────────────────────────
+
+_HSG_FORM_INPUTS = (
+    "co-hsg-mode", "co-hsg-rent", "co-hsg-rent-growth",
+    "co-hsg-has-prop", "co-hsg-occupancy", "co-hsg-label",
+    "co-hsg-payment", "co-hsg-escrow", "co-hsg-note-rate", "co-hsg-payoff",
+    "co-hsg-price", "co-hsg-purchase-date", "co-hsg-value",
+    "co-hsg-appreciation", "co-hsg-maintenance",
+    "co-hsg-rent-income", "co-hsg-vacancy", "co-hsg-prop-rent-growth",
+    "co-hsg-inflation",
+)
+
+
+@callback(
+    *[Output(i, "value") for i in _HSG_FORM_INPUTS],
+    Output("co-hsg-seeded-store", "data"),
+    Input("config-store", "data"),
+    Input("use-case", "value"),
+    State("co-hsg-seeded-store", "data"),
+)
+def seed_housing(config_data, use_case, seeded):
+    """Hydrate the Housing form from the persisted `RetirementConfig.housing` block.
+
+    Absent → every field blank except the research/long-run defaults, and crucially
+    `mode` unselected: `housing.is_configured` reads an unset mode plus an empty
+    property list as "says nothing", which is what keeps an untouched form inert and
+    the scenario byte-identical to before this module existed.
+
+    **Only re-seeds when the stored block actually changes.** `config-store` is
+    rewritten by every save on this page (expenses, income, rate) and by five other
+    pages; re-hydrating on each of those would blow away whatever the user has typed
+    here but not yet saved — silently, and then persist the reverted value on their
+    next Save. `co-hsg-seeded-store` remembers what was last seeded so an unrelated
+    config write is a no-op. Switching "Viewing as" still re-seeds, because the uid
+    is part of the comparison.
+    """
+    uid = _selected_uid(use_case)
+    user_cfg = _user_cfg(config_data, uid)
+    if user_cfg is None:
+        raise dash.exceptions.PreventUpdate
+
+    block = _housing_block(user_cfg)
+    if seeded and seeded.get("uid") == uid and seeded.get("block") == block:
+        raise dash.exceptions.PreventUpdate
+    res = block.get("residence") or {}
+    prop = _first_property(block)
+    return (
+        res.get("mode"),
+        res.get("monthly_rent"),
+        _to_pct(res.get("real_rent_growth"), _HSG_PCT_DEFAULTS["rent_growth"]),
+        bool(prop),
+        prop.get("occupancy") or "primary",
+        prop.get("label"),
+        prop.get("monthly_payment"),
+        prop.get("escrow_monthly"),
+        _to_pct(prop.get("note_rate"), 0.0),
+        prop.get("payoff_date"),
+        prop.get("purchase_price"),
+        prop.get("purchase_date"),
+        prop.get("current_value"),
+        _to_pct(prop.get("real_appreciation"), _HSG_PCT_DEFAULTS["appreciation"]),
+        _to_pct(prop.get("maintenance_pct"), _HSG_PCT_DEFAULTS["maintenance"]),
+        prop.get("monthly_rent_income"),
+        _to_pct(prop.get("vacancy_pct"), _HSG_PCT_DEFAULTS["vacancy"]),
+        _to_pct(prop.get("real_rent_growth"), _HSG_PCT_DEFAULTS["prop_rent_growth"]),
+        _to_pct(block.get("inflation"), _HSG_PCT_DEFAULTS["inflation"]),
+        {"uid": uid, "block": block},
+    )
+
+
+@callback(
+    Output("co-hsg-rent-row", "style"),
+    Output("co-hsg-property-block", "style"),
+    Output("co-hsg-rental-block", "style"),
+    Input("co-hsg-mode", "value"),
+    Input("co-hsg-has-prop", "value"),
+    Input("co-hsg-occupancy", "value"),
+)
+def toggle_housing_sections(mode, has_prop, occupancy):
+    """Reveal only the inputs that apply: rent fields when renting, the property
+    block when one is owned, the tenant fields when it is let."""
+    hide = {"display": "none"}
+    return (
+        None if mode == "rent" else hide,
+        None if has_prop else hide,
+        None if occupancy == "rental" else hide,
+    )
+
+
+@callback(
+    Output("co-hsg-active-store", "data"),
+    Input("co-housing-store", "data"),
+    State("co-hsg-active-store", "data"),
+)
+def housing_active(block, prev):
+    """Whether the Housing module is switched on — the only thing about it the
+    expenses table cares about. Held apart from `co-housing-store` and short-
+    circuited when unchanged so a keystroke doesn't re-seed that table."""
+    active = is_configured(block)
+    if active == prev:
+        raise dash.exceptions.PreventUpdate
+    return active
+
+
+@callback(
+    Output("co-hsg-rent-warning", "children"),
+    Input("co-hsg-mode", "value"),
+    Input("co-hsg-rent", "value"),
+)
+def warn_missing_rent(mode, rent):
+    """A renter with no rent amount is the module's one silent-failure mode: the
+    cost stream is $0 while `mortgage` has already left the expense table, so the
+    nest-egg goal is understated with nothing on screen to explain it."""
+    if mode != "rent" or rent not in (None, ""):
+        return None
+    return dbc.Alert([
+        html.I(className="fas fa-triangle-exclamation me-2"),
+        html.B("Enter your rent above."),
+        " Until you do, your housing cost is $0 — and because the Housing module "
+        "is on, the mortgage row has already left the expense table, so the "
+        "nest-egg goal above is understated.",
+    ], color="warning", className="small py-2 mb-0")
+
+
+@callback(
+    Output("co-housing-store", "data"),
+    *[Input(i, "value") for i in _HSG_FORM_INPUTS],
+)
+def collect_housing(*values):
+    """The whole form as one HousingConfig-shaped block, parked in a store.
+
+    Keeps `recompute` and `seed_expenses` to a single Input each rather than
+    eighteen, mirroring how `co-returns-store` carries the returns payload.
+    """
+    return _housing_from_form(*values)
+
+
+@callback(
+    Output("co-hsg-appr-hint", "children"),
+    Input("co-hsg-price", "value"),
+    Input("co-hsg-value", "value"),
+    Input("co-hsg-purchase-date", "value"),
+    Input("co-returns-store", "data"),
+)
+def housing_appreciation_hint(price, value, purchase_date, returns_store):
+    """What this home has *actually* done, as context beneath the forward assumption.
+
+    Display only, never a default: a 2019 purchase yields ~8%/yr real, and
+    extrapolating that for 30 years is fantasy — hence the long-run ~1% default in
+    the input itself. CPI comes from the returns payload's `inflation` map (the
+    market-data seam); with no holdings that map is empty and the figure degrades
+    to a *nominal* CAGR, which the hint says explicitly.
+    """
+    if not price or not value or not purchase_date:
+        return "Long-run US housing runs about 1%/yr above inflation."
+    try:
+        purchase_year = int(str(purchase_date)[:4])
+    except (TypeError, ValueError):
+        return ""
+
+    cpi = {int(k): float(v) for k, v in ((returns_store or {}).get("inflation") or {}).items()}
+    series = pd.Series(cpi, dtype="float64") if cpi else None
+    rate = derive_real_appreciation(_num(price), _num(value), purchase_year,
+                                    date.today().year, series)
+    if rate is None:
+        return "Long-run US housing runs about 1%/yr above inflation."
+
+    frame = "above inflation" if cpi else "nominal (no CPI data — upload holdings)"
+    verdict = ("well above" if rate > 0.03 else "below" if rate < 0.005 else "close to")
+    return (f"Yours has appreciated {rate:.1%}/yr {frame} since {purchase_year} — "
+            f"{verdict} the long-run ~1%. Shown as context; the forward assumption "
+            f"defaults to the long-run rate.")
+
+
+@callback(
+    Output("config-store", "data", allow_duplicate=True),
+    Output("co-hsg-save-status", "children"),
+    Input("co-hsg-save", "n_clicks"),
+    State("co-housing-store", "data"),
+    State("config-store", "data"),
+    State("use-case", "value"),
+    prevent_initial_call=True,
+)
+def save_housing(n, block, config_data, use_case):
+    """Persist the Housing block to RetirementConfig and mirror into config-store.
+
+    The whole block is written every time, explicit `None`s included: Firestore's
+    `merge=True` deep-merges nested maps, so a partial write would leave cleared
+    fields behind at their old values.
+    """
+    if not n:
+        raise dash.exceptions.PreventUpdate
+    uid = _selected_uid(use_case)
+    if not uid or not config_data or block is None:
+        raise dash.exceptions.PreventUpdate
+
+    save_retirement_config(uid, {"housing": block})
+
+    cfg = json.loads(config_data)
+    ret_cfg = cfg.setdefault("users", {}).setdefault(uid, {}).setdefault("retirement", {})
+    ret_cfg["housing"] = block
+    return json.dumps(cfg), dbc.Badge("Saved", color="success", className="ms-1")
+
+
+# ── Module 4 seeds: balances, allocation, Social Security income, gain % ──────────
 
 @callback(
     Output("co-bal-taxable", "value"),
@@ -1043,6 +1609,9 @@ def save_income(n, al_taxable, al_trad, al_roth, ss_pia, gain_frac, config_data,
     Output("co-exp-totals", "children"),
     Output("co-exp-note", "children"),
     Output("co-exp-summary", "children"),
+    Output("co-hsg-summary", "children"),
+    Output("co-hsg-equity-chart", "figure"),
+    Output("co-hsg-cost-chart", "figure"),
     Output("co-cashflow-chart", "figure"),
     Output("co-income-summary", "children"),
     Output("co-inc-summary", "children"),
@@ -1064,13 +1633,14 @@ def save_income(n, al_taxable, al_trad, al_roth, ss_pia, gain_frac, config_data,
     Input("co-alloc-roth", "value"),
     Input("co-ss-pia", "value"),
     Input("co-gain-frac", "value"),
+    Input("co-housing-store", "data"),
     Input("config-store", "data"),
     Input("use-case", "value"),
 )
 def recompute(milestones, monthly, color_mode, strategy, returns_store, exp_rows,
               hc_aca, hc_medicare, hc_ltc, hc_ltc_age,
               bal_taxable, bal_trad, bal_roth, al_taxable, al_trad, al_roth,
-              ss_pia, gain_frac, config_data, use_case):
+              ss_pia, gain_frac, housing, config_data, use_case):
     uid = _selected_uid(use_case)
     user_cfg = _user_cfg(config_data, uid)
     if user_cfg is None or not milestones or len(milestones) != 5:
@@ -1117,6 +1687,9 @@ def recompute(milestones, monthly, color_mode, strategy, returns_store, exp_rows
         return_strategy=strategy, glide_params=glide_params,
         spend_by_phase=spend_override, healthcare_overrides=hc_overrides,
         allocation=alloc_override, pia_annual=pia_override, gain_fraction=gain_override,
+        # Live Housing form; None (store not filled yet) → the persisted block, so
+        # the first paint already reflects a saved configuration.
+        housing_overrides=housing,
     )
     if s.return_strategy and s.equity_glide:
         ages = sorted(int(a) for a in s.equity_glide.keys())
@@ -1156,7 +1729,7 @@ def recompute(milestones, monthly, color_mode, strategy, returns_store, exp_rows
     fig = _projection_figure(s, color_mode)
 
     # ── Expenses module outputs (glide smile + summaries) ────────────────────────
-    glide = _glide_figure(s.spend_by_phase, s.healthcare_by_age,
+    glide = _glide_figure(s.spend_by_phase, s.healthcare_by_age, s.housing_by_age,
                           retirement_age, slow_go_age, no_go_age, s.death_age)
     spend = s.spend_by_phase
     totals = (f"Annual: go-go {_money(spend['go_go'])} · slow-go {_money(spend['slow_go'])} "
@@ -1166,17 +1739,32 @@ def recompute(milestones, monthly, color_mode, strategy, returns_store, exp_rows
     # so the seeded totals aren't a mystery for a member of a household.
     share = _effective_expense_plan(json.loads(config_data), uid)[2] if config_data else 0.0
     share_bit = f" (incl. your {share:.0%} share of household expenses)" if share else ""
+    # Housing takes the mortgage / home-improvement rows out of this table when it
+    # is configured; say so, or the missing rows read as a bug.
+    housing_bit = (" Mortgage and home improvements are modelled in Housing below."
+                   if s.housing_by_age is not None else "")
     note = (f"{n_rows} living-expense categories from your CSP plan{share_bit}, stepping down "
             "at each phase boundary. Healthcare is modelled separately below."
+            + housing_bit
             ) if n_rows else "No CSP plan found — add one on the CSP page to seed these expenses."
     health = {int(k): float(v) for k, v in
               (s.healthcare_by_age.to_dict() if s.healthcare_by_age is not None else {}).items()}
     hc_peak = max(health.values()) if health else 0.0
+    housing_note = ""
+    if s.housing_by_age is not None and len(s.housing_by_age):
+        housing_note = (f" Housing starts at {_money(float(s.housing_by_age.iloc[0]))} "
+                        "and is modelled on its own (below), because it ends on a "
+                        "known date rather than tapering.")
     glide_note = (f"Living spend steps down from {_money(max(spend.values()) if spend else 0)} "
                   f"while healthcare climbs to {_money(hc_peak)} late — their sum is the "
-                  "spending smile that drives the nest-egg goal above.")
+                  "spending smile that drives the nest-egg goal above." + housing_note)
     ltc_bit = (f" · LTC from {int(hc_ltc_age)}" if _num(hc_ltc) > 0 else "")
     exp_summary = f"{_money(spend['go_go'])}/yr go-go{ltc_bit}"
+
+    # ── Housing module outputs ───────────────────────────────────────────────────
+    hsg_summary = _housing_summary(s, housing or _housing_block(user_cfg))
+    hsg_equity = _housing_equity_figure(s.home_equity)
+    hsg_cost = _housing_cost_figure(s.housing_breakdown, retirement_age)
 
     # ── Income & tax module outputs (cash-flow chart + summary) ──────────────────
     ret_df = s.lifetime[s.lifetime["life_phase"] == "retirement"]
@@ -1189,6 +1777,7 @@ def recompute(milestones, monthly, color_mode, strategy, returns_store, exp_rows
 
     return (chips, ban_goal, ban_target, ban_status, ban_required, fig, rr_summary,
             glide, glide_note, totals, note, exp_summary,
+            hsg_summary, hsg_equity, hsg_cost,
             cashflow, income_summary, inc_summary)
 
 
@@ -1285,15 +1874,24 @@ def _projection_figure(s, mode) -> go.Figure:
     return fig
 
 
-def _glide_figure(spend, hc, retirement_age, slow_go_age, no_go_age, death_age) -> go.Figure:
+def _glide_figure(spend, hc, housing, retirement_age, slow_go_age, no_go_age,
+                  death_age) -> go.Figure:
     """Annual expenses over retirement: living spend (step-down across the three
-    phases), healthcare on its own line (the late-life rise), and their sum — the
-    rising "smile" that drives the nest-egg goal (ported from pages/retirement.py)."""
+    phases), healthcare on its own line (the late-life rise), housing when the
+    module is configured (the payoff cliff), and their sum — the rising "smile"
+    that drives the nest-egg goal (ported from pages/retirement.py).
+
+    Housing has to be in the total: once the module is on, `mortgage` and
+    `home_improvements` are out of the living-spend pool, so a total without it
+    under-reports the smile by the whole housing amount."""
     ages = list(range(int(retirement_age), int(death_age) + 1))
     living = [spend.get(phase_for_age(a, slow_go_age, no_go_age), 0.0) for a in ages]
     health = {int(k): float(v) for k, v in (hc.to_dict() if hc is not None else {}).items()}
     hc_y = [health.get(a, 0.0) for a in ages]
-    total = [lv + h for lv, h in zip(living, hc_y)]
+    house = {int(k): float(v) for k, v in
+             (housing.to_dict() if housing is not None else {}).items()}
+    hsg_y = [house.get(a, 0.0) for a in ages]
+    total = [lv + h + hs for lv, h, hs in zip(living, hc_y, hsg_y)]
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(
@@ -1307,6 +1905,12 @@ def _glide_figure(spend, hc, retirement_age, slow_go_age, no_go_age, death_age) 
         line=dict(width=2.2, color=_C_TARGET, shape="hv"),
         hovertemplate="Age %{x}<br>healthcare %{y:$,.0f}<extra></extra>",
     ))
+    if housing is not None:
+        fig.add_trace(go.Scatter(
+            x=ages, y=hsg_y, mode="lines", name="Housing",
+            line=dict(width=2.2, color=_C_HOUSE_VALUE, shape="hv"),
+            hovertemplate="Age %{x}<br>housing %{y:$,.0f}<extra></extra>",
+        ))
     fig.add_trace(go.Scatter(
         x=ages, y=total, mode="lines", name="Total expenses",
         line=dict(width=2.8, color="#444", shape="hv"),
@@ -1320,6 +1924,145 @@ def _glide_figure(spend, hc, retirement_age, slow_go_age, no_go_age, death_age) 
         yaxis=dict(title=None, tickprefix="$", tickformat="~s", showgrid=True,
                    gridcolor="#eee", zeroline=False, rangemode="tozero"),
         hovermode="x unified", showlegend=True,
+    )
+    return fig
+
+
+# ── Module 3 (Housing) figures ───────────────────────────────────────────────────
+
+def _housing_equity_figure(eq) -> go.Figure:
+    """Home value, the loan beneath it, and the equity gap between them.
+
+    `eq` is `Scenario.home_equity` (value / balance / equity by age) or None. The
+    stack is debt-then-equity so the two shaded bands sum to the value line — the
+    balance amortizes to zero and the whole band becomes equity, which is the
+    picture the module exists to show. Neither band is spendable, which is why it
+    lives here and not on the portfolio chart above.
+    """
+    if eq is None or eq.empty:
+        return _detail_empty("Describe a property above to see its equity build.")
+
+    ages = eq.index.tolist()
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=ages, y=eq["balance"], name="Mortgage balance", mode="lines",
+        line=dict(width=0, color=_C_HOUSE_DEBT), stackgroup="h",
+        fillcolor="rgba(154,165,177,0.45)",
+        hovertemplate="Age %{x}<br>balance %{y:$,.0f}<extra></extra>",
+    ))
+    fig.add_trace(go.Scatter(
+        x=ages, y=eq["equity"], name="Equity", mode="lines",
+        line=dict(width=0, color=_C_GROWTH), stackgroup="h",
+        fillcolor="rgba(74,222,128,0.35)",
+        hovertemplate="Age %{x}<br>equity %{y:$,.0f}<extra></extra>",
+    ))
+    fig.add_trace(go.Scatter(
+        x=ages, y=eq["value"], name="Home value", mode="lines",
+        line=dict(width=2.5, color=_C_HOUSE_VALUE),
+        hovertemplate="Age %{x}<br>value %{y:$,.0f}<extra></extra>",
+    ))
+    fig.update_layout(
+        **_CHART_LAYOUT, height=300, margin=dict(l=10, r=10, t=30, b=10),
+        xaxis=dict(title="Age", showgrid=False),
+        yaxis=dict(title=None, tickprefix="$", tickformat="~s", showgrid=True,
+                   gridcolor="#eee", zeroline=False, rangemode="tozero"),
+        hovermode="x unified",
+    )
+    return fig
+
+
+def _housing_cost_figure(breakdown, retirement_age=None) -> go.Figure:
+    """Annual housing cost above the line, rental income below it, net in bold.
+
+    Three things at once, which is what housing is:
+
+      * **Above zero** — the components of *where you live*, stacked:
+        `Scenario.housing_breakdown`'s escrow + maintenance floor beneath the
+        principal & interest that terminates at payoff, or a single rent band.
+        Drawing the total alone would show the cliff but not what it lands on,
+        which is the single most misunderstood thing about a mortgage. Empty
+        components are skipped so the legend stays honest.
+      * **Below zero** — net rental income as a credit, because it is money that
+        offsets the bill above even though the engine carries it on a separate
+        (taxed) channel. Plotting it downward is what lets the two be compared
+        instead of merely co-displayed.
+      * **The bold line** — the net of the two. Where it crosses below zero, what
+        you own is paying for where you live. For the own-a-rental-and-rent-your-
+        home case that crossing IS the answer, and nothing else on the page
+        states it.
+
+    Net rental income may itself be negative in a carry-heavy year; it is not
+    clamped — per the module's sign convention that is a real result, and it
+    simply pushes the credit band above the line where it belongs.
+
+    Spans current age → death, matching the portfolio chart above, so the payoff
+    cliff is visible in context rather than appearing mid-story at retirement.
+    Only the part from `retirement_age` on feeds the nest-egg goal (before then
+    these costs are already inside your CSP plan), so that boundary is marked
+    rather than left implicit.
+    """
+    if breakdown is None or breakdown.empty:
+        return _detail_empty("Set where you live above to see your housing costs.")
+
+    ages = breakdown.index.tolist()
+    rental_net = breakdown.get("rental_net")
+    has_rental = rental_net is not None and bool(rental_net.abs().sum())
+    fig = go.Figure()
+
+    for col, name, color, fill in _HOUSING_COST_TRACES:
+        if col not in breakdown.columns or not breakdown[col].abs().sum():
+            continue
+        fig.add_trace(go.Scatter(
+            x=ages, y=breakdown[col], name=name, mode="lines",
+            line=dict(width=0, color=color, shape="hv"), stackgroup="c",
+            fillcolor=fill,
+            hovertemplate=f"Age %{{x}}<br>{name.lower()} %{{y:$,.0f}}<extra></extra>",
+        ))
+
+    if has_rental:
+        fig.add_trace(go.Scatter(
+            x=ages, y=-rental_net, name="Net rental income (credit)", mode="lines",
+            line=dict(width=0, color=_C_GROWTH, shape="hv"), fill="tozeroy",
+            fillcolor="rgba(74,222,128,0.30)",
+            customdata=rental_net.tolist(),
+            hovertemplate="Age %{x}<br>net rental income %{customdata:$,.0f}"
+                          "<extra></extra>",
+        ))
+
+    fig.add_trace(go.Scatter(
+        x=ages, y=breakdown["net"],
+        name="Net housing cost" if has_rental else "Total housing cost",
+        mode="lines", line=dict(width=2.8, color="#444", shape="hv"),
+        hovertemplate="Age %{x}<br>net housing %{y:$,.0f}<extra></extra>",
+    ))
+    if has_rental:
+        # The gross cost stays visible as a faint reference, so the credit is
+        # legible as a reduction of something rather than a free-floating band.
+        fig.add_trace(go.Scatter(
+            x=ages, y=breakdown["total"], name="Cost of where you live",
+            mode="lines", line=dict(width=1.4, color="#999", dash="dot", shape="hv"),
+            hovertemplate="Age %{x}<br>where you live %{y:$,.0f}<extra></extra>",
+        ))
+        fig.add_hline(y=0, line_color="#bbb", line_width=1)
+
+    # Before retirement these costs are already inside the CSP plan, so they are
+    # shown for context but do not drive the goal. Say so on the chart.
+    if retirement_age is not None and ages and ages[0] < int(retirement_age):
+        fig.add_vrect(
+            x0=ages[0], x1=int(retirement_age), fillcolor="#94a3b8", opacity=0.07,
+            layer="below", line_width=0, annotation_text="already in your budget",
+            annotation_position="top left",
+            annotation_font=dict(size=10, color="#7a869a"),
+        )
+        fig.add_vline(x=int(retirement_age), line_width=1, line_dash="dot",
+                      line_color="#cbd5e1")
+
+    fig.update_layout(
+        **_CHART_LAYOUT, height=300, margin=dict(l=10, r=10, t=30, b=10),
+        xaxis=dict(title="Age", showgrid=False),
+        yaxis=dict(title=None, tickprefix="$", tickformat="~s", showgrid=True,
+                   gridcolor="#eee", zeroline=False),
+        hovermode="x unified",
     )
     return fig
 

@@ -126,6 +126,14 @@ class Scenario:
     rental_net_income_by_age: pd.Series | None = None  # taxed ordinary channel; may be < 0
     home_equity: pd.DataFrame | None = None            # value/balance/equity by age
     sale_proceeds: dict | None = None                  # itemized sale, else None
+    # The module chart's frame: escrow/maintenance/pi/rent/total (cost of where
+    # you live, itemized into the permanent floor and the P&I cliff), plus
+    # `rental_net` and `net` (= total − rental_net). Display only, and **wider**
+    # than the engine series above — it spans current_age…death_age so the payoff
+    # cliff is visible on the same axis as the portfolio chart, where the engine
+    # only ever sees retirement onward. Its retirement slice of `total` IS
+    # `housing_by_age`, so chart and engine cannot drift.
+    housing_breakdown: pd.DataFrame | None = None
 
     on_track: bool = field(init=False)
 
@@ -160,6 +168,11 @@ def build_scenario(
     gain_fraction: float | None = None,
     healthcare_overrides: dict | None = None,
     spend_by_phase: dict | None = None,
+    # Live housing-form state from the Coast module, in HousingConfig shape. None
+    # → the persisted `RetirementConfig.housing` block. Lets the module's inputs
+    # move the BANs before they are saved, exactly as the other three modules do;
+    # `housing.is_configured` remains the gate, so an untouched form is inert.
+    housing_overrides: dict | None = None,
     as_of_year: int | None = None,
 ) -> Scenario:
     """Build the full Coast scenario from config + the two live inputs.
@@ -234,7 +247,8 @@ def build_scenario(
     # keys from the generic pool and supplies the cost stream that replaces
     # them. `None` (no block, or a block that says nothing) leaves both alone,
     # which is what keeps every user without housing byte-identical.
-    housing_cfg = ret_cfg.get("housing")
+    housing_cfg = (housing_overrides if housing_overrides is not None
+                   else ret_cfg.get("housing"))
     hsg = resolve_housing(housing_cfg, current_age=current_age,
                           retirement_age=retirement_age, death_age=death_age,
                           birth_year=birth_year)
@@ -341,4 +355,5 @@ def build_scenario(
         rental_net_income_by_age=rental_net,
         home_equity=hsg.equity if hsg else None,
         sale_proceeds=hsg.sale if hsg else None,
+        housing_breakdown=hsg.costs_breakdown if hsg else None,
     )

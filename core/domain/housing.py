@@ -330,6 +330,50 @@ def rental_net_income_by_age(start_age: int, end_age: int, *,
 # 6. The app entry — where you live, as a cost
 # ═══════════════════════════════════════════════════════════════════════════
 
+#: Columns of `housing_costs_breakdown`, in stacking order (floor → cliff), with
+#: `total` last. `rent` and the three ownership components are mutually exclusive
+#: per age — you either pay rent or carry a home — so the frame stacks cleanly.
+HOUSING_COST_COMPONENTS: tuple[str, ...] = ("escrow", "maintenance", "pi", "rent")
+
+
+def housing_costs_breakdown(start_age: int, end_age: int, *,
+                            current_age: int,
+                            residence_mode: str = "own",
+                            monthly_rent: float = 0.0,
+                            real_rent_growth: float = DEFAULT_REAL_RENT_GROWTH,
+                            primary: dict | None = None) -> pd.DataFrame:
+    """Cost of where you live, itemized (real $).  (pure, age-indexed)
+
+    The primitive behind `housing_costs_by_age` — same relationship
+    `carrying_cost_breakdown` has to `carrying_cost_by_age`, and for the same
+    reason: the itemization is what makes the payoff cliff legible. Columns are
+    `HOUSING_COST_COMPONENTS` + `total`; renting fills only `rent`, owning fills
+    only the three ownership components, so the frame is directly stackable.
+    """
+    ages = pd.Index(range(int(start_age), int(end_age) + 1))
+    df = pd.DataFrame(0.0, index=ages, columns=list(HOUSING_COST_COMPONENTS),
+                      dtype="float64")
+
+    # `total` is taken from the branch that produced the components, never
+    # re-summed across them: re-summing reorders the floating-point addition and
+    # moves the last bit, which would shift a frozen golden for no reason.
+    if str(residence_mode) == "rent":
+        anchor = int(current_age)
+        annual = float(monthly_rent or 0.0) * 12.0
+        g = float(real_rent_growth or 0.0)
+        df["rent"] = [annual * (1.0 + g) ** (age - anchor) for age in ages]
+        df["total"] = df["rent"]
+    elif primary:
+        carry = carrying_cost_breakdown(start_age, end_age,
+                                        current_age=current_age, **primary)
+        for col in ("pi", "escrow", "maintenance"):
+            df[col] = carry[col]
+        df["total"] = carry["total"]
+    else:
+        df["total"] = 0.0
+    return df
+
+
 def housing_costs_by_age(start_age: int, end_age: int, *,
                          current_age: int,
                          residence_mode: str = "own",
@@ -353,19 +397,15 @@ def housing_costs_by_age(start_age: int, end_age: int, *,
     whenever a housing config is present, exactly as healthcare does with
     `medical` / `health_insurance`. Returns a Series indexed by age
     (start_age … end_age, inclusive).
-    """
-    if str(residence_mode) == "rent":
-        anchor = int(current_age)
-        annual = float(monthly_rent or 0.0) * 12.0
-        g = float(real_rent_growth or 0.0)
-        out = {age: annual * (1.0 + g) ** (age - anchor)
-               for age in range(int(start_age), int(end_age) + 1)}
-        return pd.Series(out, dtype="float64")
 
-    if not primary:
-        return pd.Series({age: 0.0 for age in
-                          range(int(start_age), int(end_age) + 1)}, dtype="float64")
-    return carrying_cost_by_age(start_age, end_age, current_age=current_age, **primary)
+    The `total` column of `housing_costs_breakdown`, so the engine's cost stream
+    and the module chart's itemization cannot drift apart.
+    """
+    return housing_costs_breakdown(
+        start_age, end_age, current_age=current_age,
+        residence_mode=residence_mode, monthly_rent=monthly_rent,
+        real_rent_growth=real_rent_growth, primary=primary,
+    )["total"]
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -534,14 +574,21 @@ class ResolvedHousing:
       * `inflows_by_age` — a sale, an event rather than a series, landing in the
         taxable bucket.
 
-    `equity` and `sale` are for display (the Phase 4 chart and the Phase 5
-    breakdown table); nothing in the engine reads them.
+    `equity`, `costs_breakdown` and `sale` are for display (the Phase 4 charts
+    and the Phase 5 breakdown table); nothing in the engine reads them.
     """
     costs_by_age: pd.Series              # where you live — the spend channel
     rental_net_income_by_age: pd.Series  # the taxed ordinary channel; may be < 0
     inflows_by_age: dict[int, float]     # {sale age: net proceeds to the portfolio}
     equity: pd.DataFrame                 # value / balance / equity, all properties
     sale: dict | None                    # itemized proceeds + age/label/disposition
+    # The module chart's frame, spanning `current_age … death_age` — wider than
+    # the engine series above, which start at retirement. Columns:
+    # HOUSING_COST_COMPONENTS + `total` (cost of where you live, itemized into the
+    # escrow + maintenance floor and the P&I cliff), `rental_net`, and `net`
+    # (= total − rental_net). Display only, and its retirement-window slice of
+    # `total` IS `costs_by_age`, so chart and engine cannot drift.
+    costs_breakdown: pd.DataFrame | None = None
 
 
 def is_configured(housing_cfg: dict | None) -> bool:
@@ -643,11 +690,18 @@ def _new_home_kwargs(prop: dict, value_at_sale: float, new_price: float | None, 
     )
 
 
-def _splice(pre: pd.Series, post: pd.Series, sale_age: int | None) -> pd.Series:
-    """`pre` before `sale_age`, `post` from `sale_age` on (shared index)."""
+def _splice(pre, post, sale_age: int | None):
+    """`pre` before `sale_age`, `post` from `sale_age` on (shared index).
+
+    Takes a Series or a DataFrame; a frame masks row-wise (`axis=0`), the same
+    way `_zero_from` does, so the cost breakdown splices exactly as its total.
+    """
     if sale_age is None:
         return pre
-    return pre.where(pre.index < int(sale_age), post)
+    keep = pd.Series(pre.index < int(sale_age), index=pre.index)
+    if isinstance(pre, pd.DataFrame):
+        return pre.where(keep, post, axis=0)
+    return pre.where(keep, post)
 
 
 def _zero_from(series_or_frame, sale_age: int | None):
@@ -724,13 +778,19 @@ def resolve_housing(
     mode = str(residence.get("mode") or "own")
     properties = [p for p in (cfg.get("properties") or []) if p]
 
-    cost_index = pd.Index(range(start, end + 1))
-    # Named because `equity` is the one result that leaves here as a DataFrame —
-    # the module chart and its golden both index it by age.
-    equity_index = pd.Index(range(anchor, end + 1), name="age")
+    # Two windows over the same arithmetic. The **engine** only ever sees
+    # `start … end`, because before retirement the property's economics are
+    # already in the CSP plan and adding them would double-count. The **chart**
+    # wants `anchor … end`, so the payoff cliff and the rental's contribution are
+    # visible on the same axis as the portfolio chart above rather than appearing
+    # mid-story at retirement. Everything is computed over the wider window and
+    # sliced for the engine, which leaves the engine's numbers untouched (the
+    # series are anchored at `anchor` either way).
+    display_index = pd.Index(range(anchor, end + 1), name="age")
+    equity_index = display_index
 
     # ── 2 & 4: per-property rental income and equity, each ending at its own sale
-    rental_net = pd.Series(0.0, index=cost_index, dtype="float64")
+    rental_net = pd.Series(0.0, index=display_index, dtype="float64")
     equity = pd.DataFrame(0.0, index=equity_index,
                           columns=["value", "balance", "equity"], dtype="float64")
 
@@ -739,7 +799,7 @@ def resolve_housing(
         carry = _carry_kwargs(prop, birth_year=birth_year, inflation=inflation)
 
         if _occupancy(prop) == "rental":
-            net = rental_net_income_by_age(start, end, current_age=anchor,
+            net = rental_net_income_by_age(anchor, end, current_age=anchor,
                                            **carry, **_rent_kwargs(prop))
             rental_net = rental_net.add(_zero_from(net, sold_at), fill_value=0.0)
 
@@ -757,8 +817,12 @@ def resolve_housing(
         if sold_at is None:
             continue
         sale = prop.get("sale") or {}
+        # Deliberately the ENGINE slice, not the display one: a pre-retirement
+        # sale stacks its gain on retirement-window ordinary income only, which is
+        # what the frozen goldens pin. Widening the window for the chart must not
+        # quietly re-price a sale.
         other = (float(other_ordinary_income_at_sale)
-                 + max(float(rental_net.get(sold_at, 0.0)), 0.0))
+                 + max(float(rental_net.loc[start:].get(sold_at, 0.0)), 0.0))
         proceeds = sale_proceeds(
             sold_at, current_age=anchor, occupancy=_occupancy(prop),
             current_value=float(prop.get("current_value") or 0.0),
@@ -790,8 +854,11 @@ def resolve_housing(
 
     # ── 3: where you live, and the switch if you sell it ──────────────────────
     primary = next((p for p in properties if _occupancy(p) == "primary"), None)
-    costs = housing_costs_by_age(
-        start, end, current_age=anchor, residence_mode=mode,
+    # Resolved as the itemized frame throughout, with `costs_by_age` taken as its
+    # `total` at the end — so the engine's cost stream and the module chart's
+    # floor-plus-cliff are the same numbers by construction, splice included.
+    costs = housing_costs_breakdown(
+        anchor, end, current_age=anchor, residence_mode=mode,
         monthly_rent=float(residence.get("monthly_rent") or 0.0),
         real_rent_growth=_opt(residence.get("real_rent_growth"),
                               DEFAULT_REAL_RENT_GROWTH),
@@ -803,25 +870,35 @@ def resolve_housing(
         sold_at = _sale_age(primary, anchor)
         if sold_at is not None:
             costs = _splice(costs, _post_sale_costs(
-                primary, sold_at, start, end,
+                primary, sold_at, anchor, end,
                 residence=residence, anchor=anchor, inflation=inflation,
             ), sold_at)
 
+    # The chart's single frame: what where-you-live costs, what a let property
+    # pays, and the net of the two. Assembled here rather than on the page —
+    # "net = cost − rental income" is housing knowledge, and it is the number the
+    # own-a-rental-and-rent-your-home case actually turns on.
+    chart = costs.copy()
+    chart["rental_net"] = rental_net
+    chart["net"] = chart["total"] - rental_net
+
     return ResolvedHousing(
-        costs_by_age=costs,
-        rental_net_income_by_age=rental_net,
+        costs_by_age=costs["total"].loc[start:],
+        rental_net_income_by_age=rental_net.loc[start:],
         inflows_by_age=inflows,
         equity=equity,
         sale=sale_detail,
+        costs_breakdown=chart,
     )
 
 
 def _post_sale_costs(prop: dict, sale_age: int, start: int, end: int, *,
-                     residence: dict, anchor: int, inflation: float) -> pd.Series:
+                     residence: dict, anchor: int, inflation: float) -> pd.DataFrame:
     """Where you live *after* selling the home you lived in.  (pure, age-indexed)
 
+    Itemized, like its pre-sale counterpart, so the two splice column-for-column.
     Both dispositions quote their inputs in today's dollars and apply them from
-    the sale age on, so the series is anchored at `sale_age`, not at the current
+    the sale age on, so the frame is anchored at `sale_age`, not at the current
     age — which is exactly why `carrying_cost_by_age` keeps its anchor separate
     from its window. Post-move rent falls back to `Residence.monthly_rent` when
     the sale doesn't name its own.
@@ -831,14 +908,14 @@ def _post_sale_costs(prop: dict, sale_age: int, start: int, end: int, *,
         value_at_sale = (float(prop.get("current_value") or 0.0)
                          * (1.0 + _opt(prop.get("real_appreciation"),
                                        LONG_RUN_REAL_APPRECIATION)) ** (sale_age - anchor))
-        return carrying_cost_by_age(
-            start, end, current_age=sale_age,
-            **_new_home_kwargs(prop, value_at_sale, sale.get("new_home_price"),
-                               inflation=inflation))
+        return housing_costs_breakdown(
+            start, end, current_age=sale_age, residence_mode="own",
+            primary=_new_home_kwargs(prop, value_at_sale, sale.get("new_home_price"),
+                                     inflation=inflation))
 
     rent = sale.get("monthly_rent")
     growth = sale.get("real_rent_growth")
-    return housing_costs_by_age(
+    return housing_costs_breakdown(
         start, end, current_age=sale_age, residence_mode="rent",
         monthly_rent=float((rent if rent is not None
                             else residence.get("monthly_rent")) or 0.0),

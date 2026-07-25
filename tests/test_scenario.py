@@ -607,6 +607,130 @@ def test_net_rental_income_is_taxed_and_never_appears_as_a_housing_cost():
     assert s.nest_egg_goal < kept.nest_egg_goal
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# Housing UI seams (.planning/SPEC-housing.md, Phase 4)
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# `housing_overrides` is the Coast module's live-edit channel: the form's state
+# has to move the BANs before it is saved, exactly as the other three assumption
+# modules do. `housing_breakdown` is the itemization its cost chart draws.
+
+def test_housing_overrides_beats_the_stored_block():
+    """The live form wins over whatever is persisted — otherwise every edit would
+    need a save + reload round-trip to show up."""
+    stored = build(cfg=with_housing(housing_cfg(payoff_date=None)))
+    live = build(cfg=with_housing(housing_cfg(payoff_date=None)),
+                 housing_overrides=housing_cfg(payoff_date="2050-01-01"))
+
+    assert live.nest_egg_goal < stored.nest_egg_goal
+    assert float(live.housing_by_age.loc[66]) < float(live.housing_by_age.loc[65])
+
+
+def test_housing_overrides_none_falls_back_to_config():
+    """None means "the form hasn't reported yet", not "no housing" — the first
+    paint must already reflect a saved configuration."""
+    stored = build(cfg=with_housing(housing_cfg()))
+    explicit = build(cfg=with_housing(housing_cfg()), housing_overrides=None)
+    assert explicit.nest_egg_goal == approx(stored.nest_egg_goal, rel=1e-9)
+    assert explicit.housing_by_age.equals(stored.housing_by_age)
+
+
+def test_an_untouched_form_overrides_to_nothing():
+    """The shape `pages/coast.py::_housing_from_form` emits before the user has
+    touched anything: every field None, no property. It must be as inert as no
+    block at all, or simply opening the module would cut the goal."""
+    untouched = {
+        "residence": {"mode": None, "monthly_rent": None, "real_rent_growth": 0.0},
+        "properties": [],
+        "inflation": 0.025,
+    }
+    s = build(housing_overrides=untouched)
+    base = build()
+    assert s.housing_by_age is None
+    assert s.housing_breakdown is None
+    assert s.spend_by_phase["go_go"] == approx(base.spend_by_phase["go_go"], rel=1e-9)
+    assert s.nest_egg_goal == approx(base.nest_egg_goal, rel=1e-9)
+
+
+def test_an_override_can_turn_housing_off_again():
+    """Clearing the form has to un-exclude `mortgage`, not strand the user with a
+    zero cost stream and a permanently cut goal."""
+    off = build(cfg=with_housing(housing_cfg()),
+                housing_overrides={"residence": {"mode": None}, "properties": []})
+    base = build()
+    assert off.housing_by_age is None
+    assert off.nest_egg_goal == approx(base.nest_egg_goal, rel=1e-9)
+
+
+@pytest.mark.parametrize("block", [
+    pytest.param(housing_cfg(), id="own"),
+    pytest.param({"residence": {"mode": "rent", "monthly_rent": 2_100.0},
+                  "properties": [], "inflation": 0.025}, id="rent"),
+    pytest.param(housing_cfg(properties=[
+        {**HOUSE, "sale": {"age": 72, "disposition": "rent", "monthly_rent": 2_100.0}},
+    ]), id="own-then-sell"),
+])
+def test_the_breakdown_total_is_the_cost_stream(block):
+    """The invariant that keeps the module's chart honest: what the engine spends
+    and what the chart itemizes are the same numbers, splice included.
+
+    The chart frame is *wider* — it spans current_age…death_age so the payoff
+    cliff is visible on the same axis as the portfolio chart — so the invariant
+    is over its retirement-window slice."""
+    s = build(cfg=with_housing(block))
+    bd = s.housing_breakdown
+
+    assert bd.index[0] == s.current_age          # chart starts today...
+    assert s.housing_by_age.index[0] == s.retirement_age   # ...engine at retirement
+    assert bd["total"].loc[s.retirement_age:].equals(s.housing_by_age)
+    assert bd["rental_net"].loc[s.retirement_age:].equals(s.rental_net_income_by_age)
+    assert bd["total"].sum() == approx(
+        bd[["pi", "escrow", "maintenance", "rent"]].sum().sum(), rel=1e-9)
+    assert bd["net"].equals(bd["total"] - bd["rental_net"])
+
+
+def test_the_breakdown_shows_the_cliff_landing_on_a_floor():
+    """P&I ends at payoff; escrow and maintenance do not. This is the whole
+    picture the cost chart exists to draw."""
+    s = build(cfg=with_housing(housing_cfg(payoff_date="2050-01-01")))   # age 66
+    bd = s.housing_breakdown
+
+    assert float(bd.loc[65, "pi"]) > 0.0
+    assert float(bd.loc[67, "pi"]) == 0.0
+    assert float(bd.loc[90, "escrow"]) > 0.0
+    assert float(bd.loc[90, "maintenance"]) > 0.0
+    assert float(bd.loc[90, "rent"]) == 0.0
+    # Renting is the mirror image: only the rent column carries anything.
+    r = build(cfg=with_housing({"residence": {"mode": "rent", "monthly_rent": 2_100.0},
+                                "properties": [], "inflation": 0.025}))
+    assert float(r.housing_breakdown.loc[70, "rent"]) == approx(25_200.0, rel=1e-9)
+    assert r.housing_breakdown[["pi", "escrow", "maintenance"]].abs().sum().sum() == 0.0
+
+
+def test_the_net_position_answers_rent_here_and_let_that_out():
+    """Rent an apartment while letting a house to tenants — the case the two
+    channels exist for. Neither series alone says whether the household is ahead;
+    their difference does, and that difference is what the module charts."""
+    block = {
+        "residence": {"mode": "rent", "monthly_rent": 2_100.0},
+        "properties": [{**HOUSE, "occupancy": "rental",
+                        "monthly_rent_income": 4_100.0, "vacancy_pct": 0.08}],
+        "inflation": 0.025,
+    }
+    s = build(cfg=with_housing(block))
+
+    cost = s.housing_breakdown["total"]
+    assert float(cost.loc[70]) == approx(2_100.0 * 12, rel=1e-9)   # rent only
+    # The let house's carry never lands in the cost stream — it nets against its
+    # own rent instead, which is what makes the tax right.
+    assert float(s.housing_breakdown.loc[70, "pi"]) == 0.0
+
+    net = cost - s.rental_net_income_by_age
+    assert float(net.loc[70]) < 0.0        # the rental more than covers the flat
+    assert float(net.loc[70]) == approx(
+        float(cost.loc[70]) - float(s.rental_net_income_by_age.loc[70]), rel=1e-9)
+
+
 # ── goldens ──────────────────────────────────────────────────────────────────
 
 def _housing_scenario():
