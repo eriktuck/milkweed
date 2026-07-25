@@ -15,6 +15,14 @@ steps:
     - --region=us-central1
     - --platform=managed
     - --allow-unauthenticated
+    # The Coast page's `recompute` (lifetime walk + Monte Carlo fan + pandas
+    # frames + the market-data cache) does not fit in Cloud Run's 512 MiB
+    # default: the instance was OOM-killed mid-callback and every in-flight
+    # `_dash-update-component` came back 503. Concurrency is capped alongside it
+    # because Dash fires many callbacks in parallel per page load, and 80 heavy
+    # ones sharing a single instance is what turned a tight fit into a kill.
+    - --memory=2Gi
+    - --concurrency=8
     - --set-secrets=/secrets/env-file=env-file:latest
     - --set-secrets=FIREBASE_CREDENTIALS=firebase-service-account:latest
     - --set-env-vars=GOOGLE_CLOUD_PROJECT=$PROJECT_ID,ENV_PATH=/secrets/env-file

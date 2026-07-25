@@ -176,28 +176,55 @@ def _current_age(user_cfg) -> int:
     return (date.today().year - int(by)) if by else _DEFAULT_CURRENT_AGE
 
 
+# ── Why every free-entry numeric input here is `step="any"` ─────────────────────
+#
+# `dbc.Input(type="number")` reports its value to the callback graph only when the
+# browser says the input is *valid*: its onChange does
+# `checkValidity() ? Number(value) : NaN` and hands that straight to `setProps`,
+# and NaN crosses the wire as null. An `<input type="number" min="0" step="50">`
+# fails `checkValidity()` (stepMismatch) for anything that is not an exact multiple
+# of 50 — so typing a real rent of $1,895 makes the component report **None**, the
+# collector writes None, and the save persists null. It presents as "this field
+# doesn't load", because on the next page load there is genuinely nothing there.
+#
+# A coarse `step` only ever bought nicer spinner-arrow increments, and it bought
+# them at the price of silently discarding most of the values a user would type.
+# `"any"` is the component default and never mismatches; arrows fall back to
+# stepping by 1. Integer-only fields (ages) keep `step=1` — every integer is a
+# valid multiple of 1, so validity always holds there.
+
 def _money_input(id_, **kw):
-    """$-prefixed numeric input (mirrors pages/retirement.py)."""
+    """$-prefixed numeric input (mirrors pages/retirement.py).
+
+    `step` is forced to "any" — see the note above; a coarse step silently nulls
+    any value that isn't a multiple of it.
+    """
+    kw["step"] = "any"
     return dbc.InputGroup([dbc.InputGroupText("$"),
                            dbc.Input(id=id_, type="number", size="sm", **kw)], size="sm")
 
 
 def _pct_input(id_, **kw):
     """%-suffixed numeric input (the shape already inlined for co-gain-frac and
-    the phase-scale inputs; the Housing module needs seven of them)."""
+    the phase-scale inputs; the Housing module needs seven of them).
+
+    `step` is forced to "any" for the same reason as `_money_input` — and it bit
+    harder here, where a 0.25 step rejects any odd-eighth rate a user types.
+    """
+    kw["step"] = "any"
     return dbc.InputGroup([dbc.Input(id=id_, type="number", size="sm", **kw),
                            dbc.InputGroupText("%")], size="sm")
 
 
-def _bucket_inputs(prefix, step):
+def _bucket_inputs(prefix):
     """Stacked Taxable / Tax-deferred / Roth money inputs sharing an id prefix."""
     return dbc.Row([
         dbc.Col([dbc.Label("Taxable", className="small text-muted mb-1"),
-                 _money_input(f"{prefix}-taxable", value=0, min=0, step=step)], width=12),
+                 _money_input(f"{prefix}-taxable", value=0, min=0)], width=12),
         dbc.Col([dbc.Label("Tax-deferred", className="small text-muted mb-1"),
-                 _money_input(f"{prefix}-trad", value=0, min=0, step=step)], width=12),
+                 _money_input(f"{prefix}-trad", value=0, min=0)], width=12),
         dbc.Col([dbc.Label("Roth", className="small text-muted mb-1"),
-                 _money_input(f"{prefix}-roth", value=0, min=0, step=step)], width=12),
+                 _money_input(f"{prefix}-roth", value=0, min=0)], width=12),
     ], className="g-2")
 
 
@@ -619,7 +646,7 @@ _cockpit = dbc.Card(dbc.CardBody(dbc.Row([
                 dbc.Label("Monthly contribution", className="ban-label mb-1"),
                 dbc.InputGroup([
                     dbc.InputGroupText("$"),
-                    dbc.Input(id="co-monthly", type="number", min=0, step=50, size="sm"),
+                    dbc.Input(id="co-monthly", type="number", min=0, step="any", size="sm"),
                 ], size="sm"),
             ], width="auto"),
             dbc.Col(html.Small(id="co-contribution-hint", className="assist-note"),
@@ -754,14 +781,14 @@ _expenses_module = _module(
                 dbc.Label("Slow-go", className="small text-muted mb-1"),
                 dbc.InputGroup([
                     dbc.Input(id="co-exp-slow-scale", type="number", value=100, min=0,
-                              max=200, step=5, size="sm", style={"width": "70px"}),
+                              max=200, step="any", size="sm", style={"width": "70px"}),
                     dbc.InputGroupText("%")], size="sm"),
             ], width="auto"),
             dbc.Col([
                 dbc.Label("No-go", className="small text-muted mb-1"),
                 dbc.InputGroup([
                     dbc.Input(id="co-exp-no-scale", type="number", value=100, min=0,
-                              max=200, step=5, size="sm", style={"width": "70px"}),
+                              max=200, step="any", size="sm", style={"width": "70px"}),
                     dbc.InputGroupText("%")], size="sm"),
             ], width="auto"),
             dbc.Col(dbc.Button("Apply", id="co-exp-apply-scale", color="secondary",
@@ -777,14 +804,14 @@ _expenses_module = _module(
                  className="mb-2"),
         dbc.Row([
             dbc.Col([dbc.Label("ACA bridge (pre-65), $/yr", className="small text-muted mb-1"),
-                     _money_input("co-hc-aca", value=_HC_ACA_DEFAULT, min=0, step=500)], lg=3),
+                     _money_input("co-hc-aca", value=_HC_ACA_DEFAULT, min=0)], lg=3),
             dbc.Col([dbc.Label("Medicare + OOP (65+), $/yr", className="small text-muted mb-1"),
-                     _money_input("co-hc-medicare", value=_HC_MEDICARE_DEFAULT, min=0, step=500)], lg=3),
+                     _money_input("co-hc-medicare", value=_HC_MEDICARE_DEFAULT, min=0)], lg=3),
             dbc.Col([dbc.Label("Long-term care", className="small text-muted mb-1"),
                      dbc.Select(id="co-hc-ltc-type", size="sm", options=_LTC_TYPE_OPTIONS,
                                 value=LTC_DEFAULT_TYPE)], lg=2),
             dbc.Col([dbc.Label("LTC cost, $/yr", className="small text-muted mb-1"),
-                     _money_input("co-hc-ltc", value=int(LTC_DEFAULT_ANNUAL), min=0, step=5000)], lg=2),
+                     _money_input("co-hc-ltc", value=int(LTC_DEFAULT_ANNUAL), min=0)], lg=2),
             dbc.Col([dbc.Label("LTC start age", className="small text-muted mb-1"),
                      dbc.Input(id="co-hc-ltc-age", type="number", value=LTC_DEFAULT_START_AGE,
                                min=65, max=105, step=1, size="sm")], lg=2),
@@ -847,11 +874,11 @@ _housing_module = _module(
             ), width="auto", className="d-flex align-items-center"),
         ], className="g-2 mb-2"),
         dbc.Row([
-            _hsg_field("Rent, $/mo", _money_input("co-hsg-rent", min=0, step=50),
+            _hsg_field("Rent, $/mo", _money_input("co-hsg-rent", min=0),
                        "What you pay to live where you live. Required — this is "
                        "your entire housing cost when you rent.", width=3),
             _hsg_field("Rent growth above inflation", _pct_input(
-                "co-hsg-rent-growth", step=0.25),
+                "co-hsg-rent-growth"),
                 "0% means rent keeps pace with inflation; negative models rent control.",
                 width=4),
         ], id="co-hsg-rent-row", className="g-3 mb-2"),
@@ -887,12 +914,12 @@ _housing_module = _module(
             html.P("The loan", className="small fw-bold mb-2"),
             dbc.Row([
                 _hsg_field("Total monthly payment, $/mo",
-                           _money_input("co-hsg-payment", min=0, step=50),
+                           _money_input("co-hsg-payment", min=0),
                            "Usually PITI — the whole thing you pay the servicer.",
                            width=3),
                 _hsg_field("…of which escrow, $/mo",
-                           _money_input("co-hsg-escrow", min=0, step=25), width=3),
-                _hsg_field("Note rate", _pct_input("co-hsg-note-rate", min=0, step=0.125),
+                           _money_input("co-hsg-escrow", min=0), width=3),
+                _hsg_field("Note rate", _pct_input("co-hsg-note-rate", min=0),
                            width=2),
                 _hsg_field("Paid off on", dbc.Input(id="co-hsg-payoff", type="date",
                                                     size="sm"), width=3),
@@ -908,21 +935,21 @@ _housing_module = _module(
             html.P("The asset", className="small fw-bold mb-2"),
             dbc.Row([
                 _hsg_field("Current value, $",
-                           _money_input("co-hsg-value", min=0, step=5000), width=3),
+                           _money_input("co-hsg-value", min=0), width=3),
                 _hsg_field("Purchase price, $",
-                           _money_input("co-hsg-price", min=0, step=5000), width=3),
+                           _money_input("co-hsg-price", min=0), width=3),
                 _hsg_field("Purchased on", dbc.Input(id="co-hsg-purchase-date",
                                                      type="date", size="sm"), width=3),
             ], className="g-3 mb-2"),
             dbc.Row([
                 _hsg_field("Appreciation above inflation",
-                           _pct_input("co-hsg-appreciation", step=0.25), width=3),
+                           _pct_input("co-hsg-appreciation"), width=3),
                 dbc.Col(html.Small(id="co-hsg-appr-hint", className="text-muted"),
                         className="d-flex align-items-center"),
             ], className="g-3 mb-2"),
             dbc.Row([
                 _hsg_field("Maintenance, % of value/yr",
-                           _pct_input("co-hsg-maintenance", min=0, step=0.25),
+                           _pct_input("co-hsg-maintenance", min=0),
                            "Replaces your home-improvements budget line, which is "
                            "excluded from the expense table above. Goes to zero if "
                            "you rent.", width=4),
@@ -932,12 +959,12 @@ _housing_module = _module(
                 html.P("Rented out", className="small fw-bold mb-2"),
                 dbc.Row([
                     _hsg_field("Rent collected, $/mo",
-                               _money_input("co-hsg-rent-income", min=0, step=50),
+                               _money_input("co-hsg-rent-income", min=0),
                                width=3),
                     _hsg_field("Vacancy & management",
-                               _pct_input("co-hsg-vacancy", min=0, step=1), width=3),
+                               _pct_input("co-hsg-vacancy", min=0), width=3),
                     _hsg_field("Rent growth above inflation",
-                               _pct_input("co-hsg-prop-rent-growth", step=0.25),
+                               _pct_input("co-hsg-prop-rent-growth"),
                                width=3),
                 ], className="g-3 mb-2"),
                 html.Small("Rent less this property's carrying costs is ordinary "
@@ -949,7 +976,7 @@ _housing_module = _module(
 
         dbc.Row([
             _hsg_field("Inflation (deflates the fixed payment only)",
-                       _pct_input("co-hsg-inflation", min=0, step=0.25),
+                       _pct_input("co-hsg-inflation", min=0),
                        "The model works in today's dollars, so a nominally fixed "
                        "principal & interest payment shrinks in real terms every "
                        "year. This is the only place inflation is read.", width=4),
@@ -996,19 +1023,19 @@ _income_module = _module(
         dbc.Row([
             dbc.Col([
                 html.P("Current balances", className="small fw-bold mb-2"),
-                _bucket_inputs("co-bal", 1000),
+                _bucket_inputs("co-bal"),
                 html.Small(id="co-bal-hint", className="text-muted"),
             ], lg=4),
             dbc.Col([
                 html.P("Annual contribution split", className="small fw-bold mb-2"),
-                _bucket_inputs("co-alloc", 500),
+                _bucket_inputs("co-alloc"),
                 html.Small(id="co-alloc-hint", className="text-muted"),
             ], lg=4),
             dbc.Col([
                 html.P("Social Security & taxes", className="small fw-bold mb-2"),
                 dbc.Row([
                     dbc.Col([dbc.Label("Current gross income, $/yr", className="small text-muted mb-1"),
-                             _money_input("co-ss-income", value=0, min=0, step=1000),
+                             _money_input("co-ss-income", value=0, min=0),
                              html.Small(id="co-ss-income-hint", className="text-warning")], width=12),
                 ], className="g-2"),
                 dbc.Row([
@@ -1024,13 +1051,13 @@ _income_module = _module(
                 ], className="g-2 mt-1"),
                 dbc.Row([
                     dbc.Col([dbc.Label("SS benefit at FRA (67), $/yr", className="small text-muted mb-1"),
-                             _money_input("co-ss-pia", value=0, min=0, step=500),
+                             _money_input("co-ss-pia", value=0, min=0),
                              html.Small(id="co-ss-hint", className="text-muted")], width=6),
                     dbc.Col([dbc.Label("Taxable gain %", className="small text-muted mb-1"),
                              dbc.InputGroup([
                                  dbc.Input(id="co-gain-frac", type="number",
                                            value=int(TAXABLE_GAIN_FRACTION * 100),
-                                           min=0, max=100, step=5, size="sm"),
+                                           min=0, max=100, step="any", size="sm"),
                                  dbc.InputGroupText("%")], size="sm"),
                              html.Small(id="co-gain-hint", className="text-muted")], width=6),
                 ], className="g-2 mt-1"),

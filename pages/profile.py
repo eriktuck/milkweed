@@ -84,7 +84,10 @@ def _segment_row(i, seg):
                 dbc.InputGroupText("$"),
                 dbc.Input(
                     id={"type": "profile-seg-amount", "index": i},
-                    type="number", value=seg.get("amount"), step=1000, size="sm",
+                    # step="any", not a round 1000: dbc.Input reports NaN (→ None)
+                    # for a value the browser calls stepMismatch, so a coarse step
+                    # silently discards any salary that isn't a multiple of it.
+                    type="number", value=seg.get("amount"), step="any", size="sm",
                     style={"maxWidth": "160px"},
                 ),
                 dbc.InputGroupText("/yr"),
@@ -229,7 +232,7 @@ _income_card = dbc.Card([
                      dbc.InputGroup([
                          dbc.Input(id="profile-income-growth", type="number",
                                    value=round(_DEFAULTS["income_growth_rate"] * 100, 1),
-                                   min=0, max=15, step=0.5, size="sm",
+                                   min=0, max=15, step="any", size="sm",
                                    style={"maxWidth": "90px"}),
                          dbc.InputGroupText("%"),
                      ], size="sm")),

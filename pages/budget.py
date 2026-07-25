@@ -476,7 +476,10 @@ def populate_category_table(is_open, config, user):
                             type='number',
                             value=100,
                             min=0,
-                            step=1,
+                            # step="any", not 1: dbc.Input reports NaN (→ None) for
+                            # a value the browser calls stepMismatch, so step=1 here
+                            # would silently discard a fractional percent like 92.5.
+                            step='any',
                         ),
                         dbc.InputGroupText('%'),
                     ], size='sm'),
